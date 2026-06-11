@@ -666,25 +666,40 @@ async def api_list_options():
 
 @app.post("/api/v1/git-sync")
 async def api_git_sync(request: Request):
-    """GitHub Webhook：收到 push 事件后自动 git pull 最新代码"""
+    """GitHub Webhook：收到 push 事件后把代码强制同步到 origin/main。
+
+    GitHub 是唯一真相源，Coze 侧不保留本地修改（在 Coze IDE 里直接改的代码
+    会在下次同步时被丢弃）。用 fetch + reset --hard 而非 pull，
+    避免 Coze 侧历史分叉导致 divergent branches 同步失败。
+    """
     import subprocess
-    logger.info("[git-sync] 收到 webhook 请求，开始拉取最新代码...")
+    repo_dir = os.getenv("COZE_WORKSPACE_PATH", "/workspace/projects")
+    logger.info("[git-sync] 收到 webhook 请求，开始同步 origin/main ...")
+
+    def _sync() -> dict:
+        steps = []
+        for cmd in (
+            ["git", "-C", repo_dir, "fetch", "origin", "main"],
+            ["git", "-C", repo_dir, "reset", "--hard", "origin/main"],
+        ):
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            step = {
+                "cmd": " ".join(cmd[3:]),
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+            }
+            steps.append(step)
+            logger.info(f"[git-sync] {step['cmd']}: rc={result.returncode}, "
+                        f"stdout={step['stdout']}, stderr={step['stderr']}")
+            if result.returncode != 0:
+                return {"status": "error", "steps": steps}
+        return {"status": "ok", "steps": steps}
+
     try:
-        result = subprocess.run(
-            ["git", "-C", os.getenv("COZE_WORKSPACE_PATH", "/workspace/projects"),
-             "pull", "origin", "main"],
-            capture_output=True, text=True, timeout=30,
-        )
-        logger.info(f"[git-sync] stdout: {result.stdout.strip()}")
-        if result.stderr:
-            logger.warning(f"[git-sync] stderr: {result.stderr.strip()}")
-        return {
-            "status": "ok",
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
-        }
+        return await asyncio.to_thread(_sync)
     except Exception as e:
-        logger.error(f"[git-sync] 拉取失败: {str(e)}")
+        logger.error(f"[git-sync] 同步失败: {str(e)}")
         return {"status": "error", "message": str(e)}
 
 

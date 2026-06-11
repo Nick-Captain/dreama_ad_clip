@@ -218,35 +218,48 @@ def _frame_has_subtitle(frame_image_path: str) -> bool:
     """
     用多模态 LLM 检测帧画面中是否包含字幕/文字。
     返回 True 表示有字幕，False 表示无字幕。
-    """
-    frame_url = _upload_image_to_s3(frame_image_path, f"temp/frame_check_{uuid.uuid4().hex[:8]}.png")
 
-    llm = _get_llm()
-    msg = HumanMessage(content=[
-        {
-            "type": "image_url",
-            "image_url": {"url": frame_url},
-        },
-        {
-            "type": "text",
-            "text": "请仔细观察这张视频截图，画面底部或中部是否有字幕文字（包括中文、英文、数字等任何文字叠加）？请只回答「有」或「无」，不要解释。",
-        },
-    ])
-    resp = llm.invoke([msg])
-    content = resp.content
-    if isinstance(content, list):
-        answer = ""
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                answer = str(item.get("text", ""))
-                break
-        if not answer:
-            answer = str(content[0]) if content else ""
-    else:
-        answer = str(content).strip()
-    has_sub = "有" in answer and "无" not in answer
-    logger.info(f"字幕检测结果: '{answer}' → has_subtitle={has_sub}")
-    return has_sub
+    直接走 HTTP 而非 langchain：网关返回非 JSON 响应时，langchain 只会抛
+    "'str' object has no attribute 'model_dump'" 并吞掉网关的真实错误，
+    这里自行解析并完整记录。检测失败不阻断管线（按无字幕处理继续出片）。
+    """
+    try:
+        frame_url = _upload_image_to_s3(frame_image_path, f"temp/frame_check_{uuid.uuid4().hex[:8]}.png")
+
+        api_key = os.getenv("COZE_WORKLOAD_IDENTITY_API_KEY", "")
+        base_url = (os.getenv("COZE_INTEGRATION_MODEL_BASE_URL") or "").rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        headers.update(default_headers(_get_ctx()))
+        payload = {
+            "model": "doubao-seed-2-0-lite-260215",
+            "temperature": 0,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": frame_url}},
+                    {"type": "text", "text": "请仔细观察这张视频截图，画面底部或中部是否有字幕文字（包括中文、英文、数字等任何文字叠加）？请只回答「有」或「无」，不要解释。"},
+                ],
+            }],
+        }
+        resp = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=60)
+        content_type = resp.headers.get("Content-Type", "")
+        if resp.status_code != 200 or "json" not in content_type.lower():
+            logger.warning(
+                f"[字幕检测] 网关响应异常，按无字幕继续: status={resp.status_code}, "
+                f"content_type={content_type}, body={resp.text[:300]}"
+            )
+            return False
+        data = resp.json()
+        answer = str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+        has_sub = "有" in answer and "无" not in answer
+        logger.info(f"字幕检测结果: '{answer}' → has_subtitle={has_sub}")
+        return has_sub
+    except Exception as e:
+        logger.warning(f"[字幕检测] 调用失败，按无字幕继续: {e}", exc_info=True)
+        return False
 
 
 def _remove_subtitle_with_seedream(frame_image_path: str, output_path: str, video_w: int, video_h: int, uid: str) -> str:

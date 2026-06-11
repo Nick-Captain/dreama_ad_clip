@@ -703,34 +703,6 @@ async def api_git_sync(request: Request):
         return {"status": "error", "message": str(e)}
 
 
-@app.get("/api/v1/diag-env")
-async def diag_env():
-    """诊断端点：检查环境变量和配置文件是否可读"""
-    import os as _os
-    secret_getenv = _os.getenv("FEISHU_APP_SECRET", "")
-    secret_environ = _os.environ.get("FEISHU_APP_SECRET", "")
-    secrets = _load_feishu_secrets()
-    return {
-        "env": {
-            "FEISHU_APP_SECRET_getenv": bool(secret_getenv),
-            "FEISHU_APP_SECRET_environ": bool(secret_environ),
-            "FEISHU_APP_ID": _os.getenv("FEISHU_APP_ID", ""),
-            "FEISHU_VERIFICATION_TOKEN": bool(_os.getenv("FEISHU_VERIFICATION_TOKEN", "")),
-        },
-        "config_file": {
-            "path": _FEISHU_SECRETS_PATH,
-            "exists": os.path.exists(_FEISHU_SECRETS_PATH),
-            "keys": list(secrets.keys()) if secrets else [],
-            "has_secret": bool(secrets.get("FEISHU_APP_SECRET")),
-        },
-        "effective": {
-            "FEISHU_APP_ID": FEISHU_APP_ID,
-            "FEISHU_APP_SECRET_set": bool(_get_feishu_app_secret()),
-            "FEISHU_VERIFICATION_TOKEN_set": bool(FEISHU_VERIFICATION_TOKEN),
-        },
-    }
-
-
 # ============================================================
 # 飞书事件回调端点（接收 @机器人 消息）
 # ============================================================
@@ -797,7 +769,10 @@ def _get_tenant_access_token() -> str:
     """获取飞书 tenant_access_token"""
     secret = _get_feishu_app_secret()
     if not secret:
-        raise Exception("环境变量 FEISHU_APP_SECRET 未配置，请在扣子部署环境变量中设置")
+        raise Exception(
+            "FEISHU_APP_SECRET 未配置：请设置环境变量，"
+            "或在扣子沙箱创建 config/feishu_secrets.json（该文件不入库，沙箱重建后需重建）"
+        )
     resp = requests.post(
         "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
         json={"app_id": FEISHU_APP_ID, "app_secret": secret},

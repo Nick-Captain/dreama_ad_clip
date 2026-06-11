@@ -10,8 +10,8 @@
 
 import json
 import logging
-import asyncio
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import requests
@@ -133,26 +133,43 @@ def batch_process_from_bitable(
                 "summary": summary,
             }, ensure_ascii=False)
 
-        # Step 2: 并发处理
-        semaphore = asyncio.Semaphore(max_concurrency)
+        # Step 2: 并发处理。
+        # 处理管线是阻塞同步调用，必须用线程池才能真正并发；
+        # 之前的 asyncio.run 方案在 FastAPI/飞书回调（已有事件循环）中会直接抛 RuntimeError。
+        from tools.bitable_tool import field_to_text
 
-        async def process_one(item: dict) -> dict:
-            async with semaphore:
+        def process_one(item: dict) -> dict:
                 record_id = item.get("record_id")
                 fields = item.get("fields", {})
 
-                video_url = fields.get("视频URL", "")
-                tail_name = fields.get("广告尾帧", "短剧推广尾帧")
-                voice_name = fields.get("配音音色", "米仔（视频配音女声）")
-                guide_text = fields.get("引导语", "") or "后续剧情该如何选择？快来左下角造梦次元"
-                subtitle_text = fields.get("字幕", "") or guide_text
-                search_box_url = fields.get("搜索框图片URL", "")
-                bgm_url = fields.get("BGM URL", "")
+                # search 接口的文本字段返回富文本片段数组，统一转成字符串再用
+                video_url = field_to_text(fields.get("视频URL")).strip()
+                tail_name = field_to_text(fields.get("广告尾帧"))
+                voice_name = field_to_text(fields.get("配音音色"))
+                guide_text = field_to_text(fields.get("引导语"))
+                subtitle_text = field_to_text(fields.get("字幕")) or guide_text
+                search_box_url = field_to_text(fields.get("搜索框图片URL"))
+                bgm_url = field_to_text(fields.get("BGM URL"))
                 bgm_volume = fields.get("BGM音量", None)
-                transition1 = fields.get("转场1", "硬切（无转场）")
-                transition2 = fields.get("转场2", "硬切（无转场）")
+                transition1 = field_to_text(fields.get("转场1"))
+                transition2 = field_to_text(fields.get("转场2"))
 
                 logger.info(f"[批量处理] 开始处理: record_id={record_id}")
+
+                if not video_url:
+                    error_msg = "视频URL 为空，已跳过"
+                    try:
+                        client.update_records(
+                            app_token=app_token,
+                            table_id=table_id,
+                            records=[{
+                                "record_id": record_id,
+                                "fields": {"处理状态": "失败", "错误信息": error_msg},
+                            }],
+                        )
+                    except Exception as update_err:
+                        logger.error(f"[批量处理] 更新失败状态出错: {update_err}")
+                    return {"record_id": record_id, "status": "failed", "error": error_msg}
 
                 # 更新状态为「处理中」
                 try:
@@ -173,12 +190,15 @@ def batch_process_from_bitable(
                     _tail_name = tail_name.strip() if tail_name and tail_name.strip() else "短剧推广尾帧"
                     _tail_custom_url = ""
                     if _tail_name == "自定义":
-                        _tail_custom_url = (fields.get("自定义尾帧URL") or "").strip()
+                        _tail_custom_url = field_to_text(fields.get("自定义尾帧URL")).strip()
                     _transition1 = transition1.strip() if transition1 and transition1.strip() else "硬切（无转场）"
                     _transition2 = transition2.strip() if transition2 and transition2.strip() else "硬切（无转场）"
                     _search_box_url = search_box_url.strip() if search_box_url and search_box_url.strip() else ""
                     _bgm_url = bgm_url.strip() if bgm_url and bgm_url.strip() else ""
-                    _bgm_volume = float(bgm_volume) if bgm_volume else 0.6
+                    try:
+                        _bgm_volume = float(bgm_volume) if bgm_volume else 0.6
+                    except (TypeError, ValueError):
+                        _bgm_volume = 0.6
 
                     result = process_video_pipeline(
                         video_url=video_url,
@@ -234,11 +254,15 @@ def batch_process_from_bitable(
                         logger.error(f"[批量处理] 更新失败状态出错: {update_err}")
                     return {"record_id": record_id, "status": "failed", "error": error_msg}
 
-        # 并发执行
-        async def _run_all():
-            return await asyncio.gather(*[process_one(item) for item in all_items], return_exceptions=True)
-
-        results = asyncio.run(_run_all())
+        # 线程池并发执行
+        results = []
+        with ThreadPoolExecutor(max_workers=max(1, int(max_concurrency))) as pool:
+            futures = [pool.submit(process_one, item) for item in all_items]
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    results.append(e)
 
         # 统计结果
         for r in results:

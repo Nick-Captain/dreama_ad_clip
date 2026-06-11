@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import os
 import re
 import threading
 import traceback
@@ -601,8 +602,8 @@ async def api_preview_frame(request: Request):
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
 
-    from tools.preview_tool import generate_preview
-    result = generate_preview.invoke(payload)
+    from tools.preview_tool import preview_frame
+    result = preview_frame.invoke(payload)
     return json.loads(result)
 
 
@@ -691,12 +692,38 @@ async def api_git_sync(request: Request):
 # 飞书事件回调端点（接收 @机器人 消息）
 # ============================================================
 
-FEISHU_APP_ID = "cli_a92bc422db799bd2"
-FEISHU_APP_SECRET = "XA2JnVJizp9yWQnCA8QsvfWEqfrRoCQ0"
+# 凭据一律从部署环境变量读取，禁止硬编码（历史上 Secret 曾随公开仓库泄露并已重置）
+FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "cli_a92bc422db799bd2")
+FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
+# 可选：飞书事件订阅的 Verification Token，配置后会校验回调来源
+FEISHU_VERIFICATION_TOKEN = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+
+
+# 已处理事件去重表：飞书在回调响应慢/失败时会重试推送同一事件，不去重会导致视频被重复处理
+_PROCESSED_EVENTS: Dict[str, float] = {}
+_EVENT_DEDUP_TTL = 600  # 秒
+_event_dedup_lock = threading.Lock()
+
+
+def _is_duplicate_event(event_id: str) -> bool:
+    """记录并判断事件是否已处理过（带 TTL 的内存去重，单 worker 足够）"""
+    if not event_id:
+        return False
+    now = time.time()
+    with _event_dedup_lock:
+        for eid, ts in list(_PROCESSED_EVENTS.items()):
+            if now - ts > _EVENT_DEDUP_TTL:
+                _PROCESSED_EVENTS.pop(eid, None)
+        if event_id in _PROCESSED_EVENTS:
+            return True
+        _PROCESSED_EVENTS[event_id] = now
+        return False
 
 
 def _get_tenant_access_token() -> str:
     """获取飞书 tenant_access_token"""
+    if not FEISHU_APP_SECRET:
+        raise Exception("环境变量 FEISHU_APP_SECRET 未配置，请在扣子部署环境变量中设置")
     resp = requests.post(
         "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
         json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET},
@@ -821,6 +848,13 @@ async def feishu_event_callback(request: Request):
 
     logger.info(f"[飞书回调] 收到事件: {json.dumps(body, ensure_ascii=False)[:500]}")
 
+    # 来源校验：配置了 FEISHU_VERIFICATION_TOKEN 时，拒绝 token 不匹配的伪造请求
+    if FEISHU_VERIFICATION_TOKEN:
+        req_token = body.get("token") or body.get("header", {}).get("token", "")
+        if req_token != FEISHU_VERIFICATION_TOKEN:
+            logger.warning("[飞书回调] Verification Token 不匹配，已拒绝")
+            return JSONResponse({"code": 403, "msg": "invalid token"}, status_code=403)
+
     # 飞书 URL 验证（首次配置事件订阅时）
     challenge = body.get("challenge")
     if challenge:
@@ -828,9 +862,15 @@ async def feishu_event_callback(request: Request):
 
     # 处理消息事件
     event = body.get("event", {})
-    event_type = body.get("header", {}).get("event_type", "")
+    header = body.get("header", {})
+    event_type = header.get("event_type", "")
 
     if event_type != "im.message.receive_v1":
+        return JSONResponse({"code": 0, "msg": "ok"})
+
+    # 事件去重：飞书超时重试会重复推送同一 event_id
+    if _is_duplicate_event(header.get("event_id", "")):
+        logger.info(f"[飞书回调] 重复事件，忽略: {header.get('event_id', '')}")
         return JSONResponse({"code": 0, "msg": "ok"})
 
     message_id = event.get("message", {}).get("message_id", "")
@@ -846,12 +886,14 @@ async def feishu_event_callback(request: Request):
     logger.info(f"[飞书回调] 用户消息: raw={raw_text[:200]}, cleaned={text[:200]}")
 
     if not text:
-        # 空消息，返回帮助
-        _reply_feishu_message(message_id, _get_help_text())
+        # 空消息（含直接发文件/视频等非文本消息），返回帮助
+        asyncio.create_task(asyncio.to_thread(_reply_feishu_message, message_id, _get_help_text()))
         return JSONResponse({"code": 0, "msg": "ok"})
 
-    # 异步处理（先回复 200，再处理业务）
-    async def handle_message():
+    # 后台线程处理（先回 200，再处理业务）。
+    # 必须放线程：视频处理是分钟级阻塞调用，放在事件循环里会卡死整个服务，
+    # 飞书等不到响应会重试推送，导致同一视频被重复处理。
+    def handle_message():
         try:
             # 1. 创建表格
             table_name = _parse_create_bitable_command(text)
@@ -952,7 +994,7 @@ async def feishu_event_callback(request: Request):
             except Exception:
                 pass
 
-    asyncio.create_task(handle_message())
+    asyncio.create_task(asyncio.to_thread(handle_message))
     return JSONResponse({"code": 0, "msg": "ok"})
 
 

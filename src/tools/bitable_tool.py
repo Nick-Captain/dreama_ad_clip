@@ -21,6 +21,24 @@ from langchain.tools import tool
 
 logger = logging.getLogger(__name__)
 
+
+def field_to_text(value) -> str:
+    """把多维表格 records/search 接口返回的字段值统一转成字符串。
+
+    该接口对文本字段返回富文本片段数组（如 [{"text": "...", "type": "text"}]），
+    URL 字段返回 dict，单选返回字符串——直接当字符串 .strip() 会抛 AttributeError。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(field_to_text(seg) for seg in value)
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("link") or "")
+    return str(value)
+
+
 # ============================================================
 # 表格模板字段定义
 # ============================================================
@@ -315,20 +333,20 @@ def get_bitable_records(
             fields = item.get("fields", {})
             records.append({
                 "record_id": item.get("record_id"),
-                "视频URL": fields.get("视频URL", ""),
-                "广告尾帧": fields.get("广告尾帧", ""),
-                "配音音色": fields.get("配音音色", ""),
-                "引导语": fields.get("引导语", ""),
-                "字幕": fields.get("字幕", ""),
-                "搜索框图片URL": fields.get("搜索框图片URL", ""),
-                "BGM URL": fields.get("BGM URL", ""),
+                "视频URL": field_to_text(fields.get("视频URL")),
+                "广告尾帧": field_to_text(fields.get("广告尾帧")),
+                "配音音色": field_to_text(fields.get("配音音色")),
+                "引导语": field_to_text(fields.get("引导语")),
+                "字幕": field_to_text(fields.get("字幕")),
+                "搜索框图片URL": field_to_text(fields.get("搜索框图片URL")),
+                "BGM URL": field_to_text(fields.get("BGM URL")),
                 "BGM音量": fields.get("BGM音量", ""),
-                "转场1": fields.get("转场1", ""),
-                "转场2": fields.get("转场2", ""),
-                "处理状态": fields.get("处理状态", ""),
-                "输出视频URL": fields.get("输出视频URL", ""),
-                "预览图URL": fields.get("预览图URL", ""),
-                "错误信息": fields.get("错误信息", ""),
+                "转场1": field_to_text(fields.get("转场1")),
+                "转场2": field_to_text(fields.get("转场2")),
+                "处理状态": field_to_text(fields.get("处理状态")),
+                "输出视频URL": field_to_text(fields.get("输出视频URL")),
+                "预览图URL": field_to_text(fields.get("预览图URL")),
+                "错误信息": field_to_text(fields.get("错误信息")),
             })
 
         return json.dumps({

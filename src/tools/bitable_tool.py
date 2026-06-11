@@ -60,6 +60,22 @@ def attachment_to_download_url(client: "BitableClient", value) -> str:
 
 
 # ============================================================
+# 中间帧引导语文案池：下拉选项 + 留空时随机选取
+# ============================================================
+GUIDE_TEXT_OPTIONS = [
+    "真相即将揭晓！快来左下角造梦次元",
+    "剧情反转猜不到？快来造梦次元解锁",
+    "接下来会发生什么？造梦次元告诉你",
+    "结局由你来定！快来左下角造梦次元",
+    "下一步怎么选？来造梦次元亲自决定",
+    "你的选择决定结局！速来造梦次元",
+    "故事远未结束！左下角造梦次元等你",
+    "看得意难平？来造梦次元改写结局",
+    "千万别走开！精彩续集就在造梦次元",
+    "想知道后续剧情？左下角搜造梦次元",
+]
+
+# ============================================================
 # 表格模板字段定义
 # ============================================================
 TEMPLATE_FIELDS = [
@@ -100,19 +116,22 @@ TEMPLATE_FIELDS = [
     },
     {
         "field_name": "引导语",
-        "type": 1,  # 文本
+        "type": 3,  # 单选：中间帧显示的字幕及配音文案，留空则从文案池随机
+        "property": {
+            "options": [{"name": t} for t in GUIDE_TEXT_OPTIONS]
+        },
     },
     {
-        "field_name": "字幕",
-        "type": 1,  # 文本
+        "field_name": "搜索框图片",
+        "type": 17,  # 附件
     },
     {
-        "field_name": "搜索框图片URL",
-        "type": 1,  # 文本
+        "field_name": "BGM",
+        "type": 17,  # 附件
     },
     {
-        "field_name": "BGM URL",
-        "type": 1,  # 文本
+        "field_name": "素材URL",
+        "type": 1,  # 文本：备用入口，可放多个URL，图片自动归为搜索框、音频归为BGM
     },
     {
         "field_name": "BGM音量",
@@ -254,6 +273,82 @@ class BitableClient:
         """新增字段"""
         return self._request("POST", f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields", json_body=field)
 
+    def update_field(self, app_token: str, table_id: str, field_id: str, field: dict) -> dict:
+        """更新字段（可改名称、类型、选项）"""
+        return self._request("PUT", f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields/{field_id}", json_body=field)
+
+    def delete_field(self, app_token: str, table_id: str, field_id: str) -> dict:
+        """删除字段"""
+        return self._request("DELETE", f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields/{field_id}")
+
+
+# 历史遗留的冗余列：新建 Base 自带的示例列 + 旧版模板的重复/改版字段
+LEGACY_FIELDS_TO_DELETE = ("文本", "单选", "日期", "字幕", "搜索框图片URL", "BGM URL")
+
+
+def migrate_bitable_schema(app_token: str, table_id: str) -> dict:
+    """
+    将已有表格的结构对齐到当前 TEMPLATE_FIELDS：
+    1. 默认主列「文本」更名复用为「素材URL」（主列不可删除，只能改名）
+    2. 删除历史遗留的冗余列（仅删 LEGACY_FIELDS_TO_DELETE 中点名的）
+    3. 「引导语」改为含文案池选项的下拉单选
+    4. 补齐模板中缺失的列
+
+    幂等：重复执行无副作用。
+    """
+    client = BitableClient()
+    actions = []
+
+    fields_resp = client.list_fields(app_token=app_token, table_id=table_id)
+    existing = {f["field_name"]: f for f in fields_resp.get("data", {}).get("items", [])}
+
+    # 1. 主列「文本」改造为「素材URL」
+    if "文本" in existing and "素材URL" not in existing:
+        try:
+            client.update_field(
+                app_token, table_id, existing["文本"]["field_id"],
+                {"field_name": "素材URL", "type": 1},
+            )
+            existing["素材URL"] = existing.pop("文本")
+            actions.append("主列「文本」更名为「素材URL」")
+        except Exception as e:
+            actions.append(f"更名「文本」失败: {e}")
+
+    # 2. 删除冗余列
+    for name in LEGACY_FIELDS_TO_DELETE:
+        if name in existing:
+            try:
+                client.delete_field(app_token, table_id, existing[name]["field_id"])
+                actions.append(f"删除冗余列「{name}」")
+                existing.pop(name)
+            except Exception as e:
+                actions.append(f"删除「{name}」失败: {e}")
+
+    # 2. 「引导语」确保为下拉单选并刷新文案池选项
+    guide_def = next(f for f in TEMPLATE_FIELDS if f["field_name"] == "引导语")
+    if "引导语" in existing:
+        try:
+            client.update_field(
+                app_token, table_id, existing["引导语"]["field_id"],
+                {"field_name": "引导语", "type": guide_def["type"], "property": guide_def["property"]},
+            )
+            actions.append("「引导语」已设为下拉单选（10条文案池）")
+        except Exception as e:
+            actions.append(f"更新「引导语」失败: {e}")
+
+    # 3. 补齐缺失的模板列
+    for field_def in TEMPLATE_FIELDS:
+        if field_def["field_name"] not in existing:
+            try:
+                client.add_field(app_token=app_token, table_id=table_id, field=field_def)
+                actions.append(f"新增列「{field_def['field_name']}」")
+            except Exception as e:
+                actions.append(f"新增「{field_def['field_name']}」失败: {e}")
+
+    final_fields = client.list_fields(app_token=app_token, table_id=table_id)
+    field_names = [f["field_name"] for f in final_fields.get("data", {}).get("items", [])]
+    return {"success": True, "actions": actions, "current_fields": field_names}
+
 
 # ============================================================
 # LangChain 工具
@@ -284,23 +379,16 @@ def create_bitable_template(table_name: str = "广告尾帧批量处理") -> str
         table_id = tables[0]["table_id"]
         logger.info(f"使用默认数据表: table_id={table_id}")
 
-        # 步骤3：逐个添加字段
-        added_fields = []
-        for field_def in TEMPLATE_FIELDS:
-            try:
-                client.add_field(app_token=app_token, table_id=table_id, field=field_def)
-                added_fields.append(field_def["field_name"])
-                logger.info(f"添加字段成功: {field_def['field_name']}")
-            except Exception as field_err:
-                logger.warning(f"添加字段失败 {field_def['field_name']}: {field_err}")
+        # 步骤3：对齐模板结构（清理默认示例列 + 添加业务字段）
+        migrate_result = migrate_bitable_schema(app_token, table_id)
 
         return json.dumps({
             "success": True,
             "app_token": app_token,
             "table_id": table_id,
-            "fields_added": added_fields,
-            "total_fields": len(TEMPLATE_FIELDS),
-            "message": f"多维表格「{table_name}」创建成功！已添加 {len(added_fields)}/{len(TEMPLATE_FIELDS)} 个字段。",
+            "actions": migrate_result.get("actions", []),
+            "fields": migrate_result.get("current_fields", []),
+            "message": f"多维表格「{table_name}」创建成功！",
             "usage": f"批量处理时告诉机器人：开始批量处理 app_token={app_token} table_id={table_id}",
         }, ensure_ascii=False)
 
@@ -362,15 +450,20 @@ def get_bitable_records(
         records = []
         for item in all_items:
             fields = item.get("fields", {})
+            def _attachment_count(name: str) -> int:
+                value = fields.get(name)
+                return len(value) if isinstance(value, list) else 0
+
             records.append({
                 "record_id": item.get("record_id"),
                 "视频URL": field_to_text(fields.get("视频URL")),
+                "视频附件数": _attachment_count("视频附件") or _attachment_count("附件"),
                 "广告尾帧": field_to_text(fields.get("广告尾帧")),
                 "配音音色": field_to_text(fields.get("配音音色")),
                 "引导语": field_to_text(fields.get("引导语")),
-                "字幕": field_to_text(fields.get("字幕")),
-                "搜索框图片URL": field_to_text(fields.get("搜索框图片URL")),
-                "BGM URL": field_to_text(fields.get("BGM URL")),
+                "搜索框图片数": _attachment_count("搜索框图片"),
+                "BGM附件数": _attachment_count("BGM"),
+                "素材URL": field_to_text(fields.get("素材URL")),
                 "BGM音量": fields.get("BGM音量", ""),
                 "转场1": field_to_text(fields.get("转场1")),
                 "转场2": field_to_text(fields.get("转场2")),

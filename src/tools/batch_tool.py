@@ -10,9 +10,12 @@
 
 import json
 import logging
+import random
+import re
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from langchain.tools import tool
@@ -62,6 +65,37 @@ def _send_feishu_card(title: str, content: str, actions: Optional[list] = None) 
     }
     resp = requests.post(_get_webhook_url(), json=payload, timeout=10)
     return resp.json()
+
+
+# ============================================================
+# 素材URL分类：备用列里图片归搜索框、音频归BGM
+# ============================================================
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".wma")
+
+
+def _classify_material_url(url: str) -> str:
+    """按扩展名归类素材URL（image/audio/unknown），无扩展名时读响应头判断。
+
+    用流式 GET 而非 HEAD：TOS 预签名链接不支持 HEAD（返回403）。
+    """
+    path = urlparse(url).path.lower()
+    if path.endswith(IMAGE_EXTS):
+        return "image"
+    if path.endswith(AUDIO_EXTS):
+        return "audio"
+    try:
+        resp = requests.get(url, stream=True, timeout=15)
+        content_type = resp.headers.get("Content-Type", "").lower()
+        resp.close()
+        if content_type.startswith("image/"):
+            return "image"
+        if content_type.startswith("audio/"):
+            return "audio"
+    except Exception as e:
+        logger.warning(f"[素材URL] 类型探测失败: {url[:100]} - {e}")
+    return "unknown"
 
 
 # ============================================================
@@ -136,7 +170,7 @@ def batch_process_from_bitable(
         # Step 2: 并发处理。
         # 处理管线是阻塞同步调用，必须用线程池才能真正并发；
         # 之前的 asyncio.run 方案在 FastAPI/飞书回调（已有事件循环）中会直接抛 RuntimeError。
-        from tools.bitable_tool import field_to_text, attachment_to_download_url
+        from tools.bitable_tool import field_to_text, attachment_to_download_url, GUIDE_TEXT_OPTIONS
 
         def process_one(item: dict) -> dict:
                 record_id = item.get("record_id")
@@ -162,12 +196,35 @@ def batch_process_from_bitable(
                 tail_name = field_to_text(fields.get("广告尾帧"))
                 voice_name = field_to_text(fields.get("配音音色"))
                 guide_text = field_to_text(fields.get("引导语"))
-                subtitle_text = field_to_text(fields.get("字幕")) or guide_text
-                search_box_url = field_to_text(fields.get("搜索框图片URL"))
-                bgm_url = field_to_text(fields.get("BGM URL"))
                 bgm_volume = fields.get("BGM音量", None)
                 transition1 = field_to_text(fields.get("转场1"))
                 transition2 = field_to_text(fields.get("转场2"))
+
+                # 搜索框/BGM：优先附件列，兼容旧URL列，最后用「素材URL」备用列补位
+                search_box_url = ""
+                bgm_url = ""
+                if fields.get("搜索框图片"):
+                    try:
+                        search_box_url = attachment_to_download_url(client, fields.get("搜索框图片"))
+                    except Exception as att_err:
+                        logger.warning(f"[批量处理] record_id={record_id} 读取附件「搜索框图片」失败: {att_err}")
+                if fields.get("BGM"):
+                    try:
+                        bgm_url = attachment_to_download_url(client, fields.get("BGM"))
+                    except Exception as att_err:
+                        logger.warning(f"[批量处理] record_id={record_id} 读取附件「BGM」失败: {att_err}")
+                if not search_box_url:
+                    search_box_url = field_to_text(fields.get("搜索框图片URL")).strip()
+                if not bgm_url:
+                    bgm_url = field_to_text(fields.get("BGM URL")).strip()
+                for material_url in filter(None, re.split(r"[\s,，;；]+", field_to_text(fields.get("素材URL")).strip())):
+                    kind = _classify_material_url(material_url)
+                    if kind == "image" and not search_box_url:
+                        search_box_url = material_url
+                    elif kind == "audio" and not bgm_url:
+                        bgm_url = material_url
+                    elif kind == "unknown":
+                        logger.warning(f"[批量处理] record_id={record_id} 素材URL无法识别类型，已忽略: {material_url[:100]}")
 
                 logger.info(f"[批量处理] 开始处理: record_id={record_id}")
 
@@ -199,8 +256,9 @@ def batch_process_from_bitable(
                 # 调用视频处理管线
                 try:
                     # 默认值处理：空字段使用内置默认值
-                    _guide_text = guide_text.strip() if guide_text and guide_text.strip() else "后续剧情该如何选择？快来左下角造梦次元"
-                    _subtitle_text = subtitle_text.strip() if subtitle_text and subtitle_text.strip() else _guide_text
+                    # 引导语（=中间帧字幕，同一内容）：未选择时从文案池随机选取
+                    _guide_text = guide_text.strip() if guide_text and guide_text.strip() else random.choice(GUIDE_TEXT_OPTIONS)
+                    _subtitle_text = _guide_text
                     _voice_name = voice_name.strip() if voice_name and voice_name.strip() else "米仔（视频配音女声）"
                     _tail_name = tail_name.strip() if tail_name and tail_name.strip() else "短剧推广尾帧"
                     _tail_custom_url = ""

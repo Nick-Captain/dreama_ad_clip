@@ -652,6 +652,24 @@ async def api_create_bitable(request: Request):
     return json.loads(result)
 
 
+@app.post("/api/v1/migrate-bitable")
+async def api_migrate_bitable(request: Request):
+    """将已有多维表格结构对齐到当前模板（清理冗余列、引导语改下拉、补齐新列）"""
+    ctx = new_context(method="api_migrate_bitable", headers=request.headers)
+    request_context.set(ctx)
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+    app_token = payload.get("app_token", "")
+    table_id = payload.get("table_id", "")
+    if not app_token or not table_id:
+        raise HTTPException(status_code=400, detail="app_token 和 table_id 必填")
+
+    from tools.bitable_tool import migrate_bitable_schema
+    return await asyncio.to_thread(migrate_bitable_schema, app_token, table_id)
+
+
 @app.get("/api/v1/options")
 async def api_list_options():
     """列出所有可用选项"""

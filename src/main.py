@@ -705,20 +705,29 @@ async def api_git_sync(request: Request):
 
 @app.get("/api/v1/diag-env")
 async def diag_env():
-    """诊断端点：检查环境变量是否可读"""
+    """诊断端点：检查环境变量和配置文件是否可读"""
     import os as _os
     secret_getenv = _os.getenv("FEISHU_APP_SECRET", "")
     secret_environ = _os.environ.get("FEISHU_APP_SECRET", "")
+    secrets = _load_feishu_secrets()
     return {
-        "FEISHU_APP_SECRET": {
-            "getenv_len": len(secret_getenv),
-            "getenv_set": bool(secret_getenv),
-            "environ_len": len(secret_environ),
-            "environ_set": bool(secret_environ),
+        "env": {
+            "FEISHU_APP_SECRET_getenv": bool(secret_getenv),
+            "FEISHU_APP_SECRET_environ": bool(secret_environ),
+            "FEISHU_APP_ID": _os.getenv("FEISHU_APP_ID", ""),
+            "FEISHU_VERIFICATION_TOKEN": bool(_os.getenv("FEISHU_VERIFICATION_TOKEN", "")),
         },
-        "FEISHU_APP_ID": _os.getenv("FEISHU_APP_ID", ""),
-        "FEISHU_VERIFICATION_TOKEN_set": bool(_os.getenv("FEISHU_VERIFICATION_TOKEN", "")),
-        "all_env_keys": sorted([k for k in _os.environ.keys() if "FEISHU" in k or "SECRET" in k or "TOKEN" in k]),
+        "config_file": {
+            "path": _FEISHU_SECRETS_PATH,
+            "exists": os.path.exists(_FEISHU_SECRETS_PATH),
+            "keys": list(secrets.keys()) if secrets else [],
+            "has_secret": bool(secrets.get("FEISHU_APP_SECRET")),
+        },
+        "effective": {
+            "FEISHU_APP_ID": FEISHU_APP_ID,
+            "FEISHU_APP_SECRET_set": bool(_get_feishu_app_secret()),
+            "FEISHU_VERIFICATION_TOKEN_set": bool(FEISHU_VERIFICATION_TOKEN),
+        },
     }
 
 
@@ -726,22 +735,41 @@ async def diag_env():
 # 飞书事件回调端点（接收 @机器人 消息）
 # ============================================================
 
-# 凭据一律从部署环境变量读取，禁止硬编码（历史上 Secret 曾随公开仓库泄露并已重置）
-FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "cli_a92bc422db799bd2")
-# 可选：飞书事件订阅的 Verification Token，配置后会校验回调来源
-FEISHU_VERIFICATION_TOKEN = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+# 凭据从配置文件读取（Coze 部署环境变量注入不可靠，改用文件方案）
+# config/feishu_secrets.json 已加入 .gitignore，不会被推送到公开仓库
+
+_FEISHU_SECRETS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "feishu_secrets.json")
+
+
+def _load_feishu_secrets() -> dict:
+    """加载飞书凭据配置文件。"""
+    try:
+        with open(_FEISHU_SECRETS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _get_feishu_config(key: str, default: str = "") -> str:
+    """读取飞书配置项，优先环境变量，其次配置文件。"""
+    # 先尝试环境变量（如果 Coze 后续修复了注入问题）
+    val = os.getenv(key, "")
+    if val:
+        return val
+    # 兜底：从配置文件读取
+    secrets = _load_feishu_secrets()
+    return secrets.get(key, default)
+
+
+FEISHU_APP_ID = _get_feishu_config("FEISHU_APP_ID", "cli_a92bc422db799bd2")
+FEISHU_VERIFICATION_TOKEN = _get_feishu_config("FEISHU_VERIFICATION_TOKEN", "")
 
 
 def _get_feishu_app_secret() -> str:
-    """懒加载飞书 App Secret，每次调用时实时读取环境变量。
-    
-    不能使用模块级 os.getenv，因为 Coze 部署环境变量的注入时机可能晚于 Python 进程启动。
-    """
-    secret = os.getenv("FEISHU_APP_SECRET", "")
-    if not secret:
-        # 兜底：尝试从 os.environ 直接读取
-        secret = os.environ.get("FEISHU_APP_SECRET", "")
-    return secret
+    """读取飞书 App Secret（优先环境变量，其次配置文件）。"""
+    return _get_feishu_config("FEISHU_APP_SECRET", "")
 
 
 # 已处理事件去重表：飞书在回调响应慢/失败时会重试推送同一事件，不去重会导致视频被重复处理

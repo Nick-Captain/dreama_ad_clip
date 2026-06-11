@@ -48,5 +48,8 @@ __pycache__/
 *.xlsx
 *.csv
 
+# Secrets (never commit to public repo)
+config/feishu_secrets.json
+
 # Preview files
 .preview

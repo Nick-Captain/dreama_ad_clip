@@ -39,6 +39,26 @@ def field_to_text(value) -> str:
     return str(value)
 
 
+def attachment_to_download_url(client: "BitableClient", value) -> str:
+    """把附件字段值换成可直接下载的临时URL（多个附件时取第一个）。
+
+    附件字段值形如 [{"file_token": "...", "name": "...", "size": ..., "type": "..."}]，
+    其中自带的 url/tmp_url 下载时仍需鉴权头，处理管线用不了，
+    必须经 batch_get_tmp_download_url 换成免鉴权的临时链接。
+    """
+    if not isinstance(value, list) or not value:
+        return ""
+    first = value[0]
+    if not isinstance(first, dict):
+        return ""
+    file_token = first.get("file_token", "")
+    if not file_token:
+        return ""
+    resp = client.get_tmp_download_urls([file_token])
+    urls = resp.get("data", {}).get("tmp_download_urls", [])
+    return urls[0].get("tmp_download_url", "") if urls else ""
+
+
 # ============================================================
 # 表格模板字段定义
 # ============================================================
@@ -46,6 +66,10 @@ TEMPLATE_FIELDS = [
     {
         "field_name": "视频URL",
         "type": 1,  # 文本
+    },
+    {
+        "field_name": "视频附件",
+        "type": 17,  # 附件：与「视频URL」二选一，附件优先级低于URL
     },
     {
         "field_name": "广告尾帧",
@@ -218,6 +242,13 @@ class BitableClient:
     def list_fields(self, app_token: str, table_id: str) -> dict:
         """列出字段"""
         return self._request("GET", f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields")
+
+    def get_tmp_download_urls(self, file_tokens: list) -> dict:
+        """获取素材（如多维表格附件）的临时下载链接，链接可免鉴权直接下载"""
+        return self._request(
+            "GET", "/drive/v1/medias/batch_get_tmp_download_url",
+            params={"file_tokens": file_tokens},
+        )
 
     def add_field(self, app_token: str, table_id: str, field: dict) -> dict:
         """新增字段"""

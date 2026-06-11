@@ -136,7 +136,7 @@ def batch_process_from_bitable(
         # Step 2: 并发处理。
         # 处理管线是阻塞同步调用，必须用线程池才能真正并发；
         # 之前的 asyncio.run 方案在 FastAPI/飞书回调（已有事件循环）中会直接抛 RuntimeError。
-        from tools.bitable_tool import field_to_text
+        from tools.bitable_tool import field_to_text, attachment_to_download_url
 
         def process_one(item: dict) -> dict:
                 record_id = item.get("record_id")
@@ -144,6 +144,21 @@ def batch_process_from_bitable(
 
                 # search 接口的文本字段返回富文本片段数组，统一转成字符串再用
                 video_url = field_to_text(fields.get("视频URL")).strip()
+
+                # URL 为空时回退到附件列：用户可直接把视频文件传进表格
+                attachment_error = ""
+                if not video_url:
+                    for att_field_name in ("视频附件", "附件"):
+                        att_value = fields.get(att_field_name)
+                        if not att_value:
+                            continue
+                        try:
+                            video_url = attachment_to_download_url(client, att_value)
+                        except Exception as att_err:
+                            attachment_error = f"读取附件「{att_field_name}」失败: {att_err}"
+                            logger.warning(f"[批量处理] record_id={record_id} {attachment_error}")
+                        if video_url:
+                            break
                 tail_name = field_to_text(fields.get("广告尾帧"))
                 voice_name = field_to_text(fields.get("配音音色"))
                 guide_text = field_to_text(fields.get("引导语"))
@@ -157,7 +172,7 @@ def batch_process_from_bitable(
                 logger.info(f"[批量处理] 开始处理: record_id={record_id}")
 
                 if not video_url:
-                    error_msg = "视频URL 为空，已跳过"
+                    error_msg = attachment_error or "「视频URL」和「视频附件/附件」均为空，已跳过"
                     try:
                         client.update_records(
                             app_token=app_token,

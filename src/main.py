@@ -703,15 +703,45 @@ async def api_git_sync(request: Request):
         return {"status": "error", "message": str(e)}
 
 
+@app.get("/api/v1/diag-env")
+async def diag_env():
+    """诊断端点：检查环境变量是否可读"""
+    import os as _os
+    secret_getenv = _os.getenv("FEISHU_APP_SECRET", "")
+    secret_environ = _os.environ.get("FEISHU_APP_SECRET", "")
+    return {
+        "FEISHU_APP_SECRET": {
+            "getenv_len": len(secret_getenv),
+            "getenv_set": bool(secret_getenv),
+            "environ_len": len(secret_environ),
+            "environ_set": bool(secret_environ),
+        },
+        "FEISHU_APP_ID": _os.getenv("FEISHU_APP_ID", ""),
+        "FEISHU_VERIFICATION_TOKEN_set": bool(_os.getenv("FEISHU_VERIFICATION_TOKEN", "")),
+        "all_env_keys": sorted([k for k in _os.environ.keys() if "FEISHU" in k or "SECRET" in k or "TOKEN" in k]),
+    }
+
+
 # ============================================================
 # 飞书事件回调端点（接收 @机器人 消息）
 # ============================================================
 
 # 凭据一律从部署环境变量读取，禁止硬编码（历史上 Secret 曾随公开仓库泄露并已重置）
 FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "cli_a92bc422db799bd2")
-FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 # 可选：飞书事件订阅的 Verification Token，配置后会校验回调来源
 FEISHU_VERIFICATION_TOKEN = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+
+
+def _get_feishu_app_secret() -> str:
+    """懒加载飞书 App Secret，每次调用时实时读取环境变量。
+    
+    不能使用模块级 os.getenv，因为 Coze 部署环境变量的注入时机可能晚于 Python 进程启动。
+    """
+    secret = os.getenv("FEISHU_APP_SECRET", "")
+    if not secret:
+        # 兜底：尝试从 os.environ 直接读取
+        secret = os.environ.get("FEISHU_APP_SECRET", "")
+    return secret
 
 
 # 已处理事件去重表：飞书在回调响应慢/失败时会重试推送同一事件，不去重会导致视频被重复处理
@@ -737,11 +767,12 @@ def _is_duplicate_event(event_id: str) -> bool:
 
 def _get_tenant_access_token() -> str:
     """获取飞书 tenant_access_token"""
-    if not FEISHU_APP_SECRET:
+    secret = _get_feishu_app_secret()
+    if not secret:
         raise Exception("环境变量 FEISHU_APP_SECRET 未配置，请在扣子部署环境变量中设置")
     resp = requests.post(
         "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-        json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET},
+        json={"app_id": FEISHU_APP_ID, "app_secret": secret},
         timeout=10,
     )
     data = resp.json()

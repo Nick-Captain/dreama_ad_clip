@@ -251,7 +251,12 @@ def batch_process_from_bitable(
 
                 except Exception as e:
                     error_msg = str(e)
-                    logger.error(f"[批量处理] 失败: record_id={record_id}, error={error_msg}")
+                    tb = traceback.format_exc()
+                    logger.error(f"[批量处理] 失败: record_id={record_id}, error={error_msg}\n{tb}")
+                    # 把出错位置（最后两层调用帧）一并写回表格，便于不翻服务端日志就能定位
+                    frame_lines = [ln.strip() for ln in tb.splitlines() if ln.strip().startswith("File ")]
+                    location = " ← ".join(frame_lines[-2:]) if frame_lines else ""
+                    detail = f"{error_msg}\n位置: {location}" if location else error_msg
                     # 失败：写回错误信息
                     try:
                         client.update_records(
@@ -261,7 +266,7 @@ def batch_process_from_bitable(
                                 "record_id": record_id,
                                 "fields": {
                                     "处理状态": "失败",
-                                    "错误信息": error_msg[:500],
+                                    "错误信息": detail[:500],
                                 },
                             }],
                         )

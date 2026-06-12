@@ -196,6 +196,8 @@ def batch_process_from_bitable(
                 tail_name = field_to_text(fields.get("广告尾帧"))
                 voice_name = field_to_text(fields.get("配音音色"))
                 guide_text = field_to_text(fields.get("引导语"))
+                # 记录里已有旧的输出链接时（重跑场景），覆盖前备份到错误信息列
+                old_output_url = field_to_text(fields.get("输出视频URL")).strip()
                 bgm_volume = fields.get("BGM音量", None)
                 transition1 = field_to_text(fields.get("转场1"))
                 transition2 = field_to_text(fields.get("转场2"))
@@ -290,7 +292,11 @@ def batch_process_from_bitable(
                     result_data = result
 
                     if result_data.get("success"):
-                        # 成功：写回输出URL
+                        # 成功：写回输出URL；如有旧链接则备份说明，否则清空过期的错误信息
+                        if old_output_url:
+                            note = f"提示：本条为重新处理，旧输出视频已被覆盖。旧链接备份：{old_output_url}"
+                        else:
+                            note = ""
                         client.update_records(
                             app_token=app_token,
                             table_id=table_id,
@@ -299,6 +305,7 @@ def batch_process_from_bitable(
                                 "fields": {
                                     "处理状态": "成功",
                                     "输出视频URL": result_data.get("final_video_url", ""),
+                                    "错误信息": note,
                                 },
                             }],
                         )

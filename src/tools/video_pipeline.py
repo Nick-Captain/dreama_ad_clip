@@ -214,18 +214,18 @@ def _is_black_frame(frame_image_path: str, threshold: float = 10.0) -> bool:
     return is_black
 
 
-def _frame_has_subtitle(frame_image_path: str) -> bool:
+def _vision_detect_subtitle(image_url: str) -> dict:
     """
-    用多模态 LLM 检测帧画面中是否包含字幕/文字。
-    返回 True 表示有字幕，False 表示无字幕。
+    调用多模态网关检测图片是否含字幕，返回完整诊断信息。
 
     直接走 HTTP 而非 langchain：网关返回非 JSON 响应时，langchain 只会抛
-    "'str' object has no attribute 'model_dump'" 并吞掉网关的真实错误，
-    这里自行解析并完整记录。检测失败不阻断管线（按无字幕处理继续出片）。
+    "'str' object has no attribute 'model_dump'" 并吞掉网关的真实错误。
     """
+    diag = {
+        "ok": False, "has_subtitle": False, "answer": "",
+        "status": None, "content_type": "", "body_head": "", "error": "",
+    }
     try:
-        frame_url = _upload_image_to_s3(frame_image_path, f"temp/frame_check_{uuid.uuid4().hex[:8]}.png")
-
         api_key = os.getenv("COZE_WORKLOAD_IDENTITY_API_KEY", "")
         base_url = (os.getenv("COZE_INTEGRATION_MODEL_BASE_URL") or "").rstrip("/")
         headers = {
@@ -239,24 +239,43 @@ def _frame_has_subtitle(frame_image_path: str) -> bool:
             "messages": [{
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": frame_url}},
+                    {"type": "image_url", "image_url": {"url": image_url}},
                     {"type": "text", "text": "请仔细观察这张视频截图，画面底部或中部是否有字幕文字（包括中文、英文、数字等任何文字叠加）？请只回答「有」或「无」，不要解释。"},
                 ],
             }],
         }
         resp = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=60)
-        content_type = resp.headers.get("Content-Type", "")
-        if resp.status_code != 200 or "json" not in content_type.lower():
-            logger.warning(
-                f"[字幕检测] 网关响应异常，按无字幕继续: status={resp.status_code}, "
-                f"content_type={content_type}, body={resp.text[:300]}"
-            )
-            return False
+        diag["status"] = resp.status_code
+        diag["content_type"] = resp.headers.get("Content-Type", "")
+        diag["body_head"] = resp.text[:300]
+        if resp.status_code != 200 or "json" not in diag["content_type"].lower():
+            diag["error"] = "网关返回非JSON响应"
+            return diag
         data = resp.json()
         answer = str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
-        has_sub = "有" in answer and "无" not in answer
-        logger.info(f"字幕检测结果: '{answer}' → has_subtitle={has_sub}")
-        return has_sub
+        diag["answer"] = answer
+        diag["has_subtitle"] = "有" in answer and "无" not in answer
+        diag["ok"] = True
+        return diag
+    except Exception as e:
+        diag["error"] = str(e)
+        return diag
+
+
+def _frame_has_subtitle(frame_image_path: str) -> bool:
+    """
+    用多模态 LLM 检测帧画面中是否包含字幕/文字。
+    返回 True 表示有字幕，False 表示无字幕。
+    检测失败不阻断管线（按无字幕处理继续出片），但完整记录网关响应。
+    """
+    try:
+        frame_url = _upload_image_to_s3(frame_image_path, f"temp/frame_check_{uuid.uuid4().hex[:8]}.png")
+        diag = _vision_detect_subtitle(frame_url)
+        if not diag["ok"]:
+            logger.warning(f"[字幕检测] 检测失败，按无字幕继续: {json.dumps(diag, ensure_ascii=False)[:600]}")
+            return False
+        logger.info(f"字幕检测结果: '{diag['answer']}' → has_subtitle={diag['has_subtitle']}")
+        return diag["has_subtitle"]
     except Exception as e:
         logger.warning(f"[字幕检测] 调用失败，按无字幕继续: {e}", exc_info=True)
         return False

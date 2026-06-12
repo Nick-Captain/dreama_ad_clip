@@ -19,6 +19,8 @@ from coze_workload_identity import Client
 
 from langchain.tools import tool
 
+from tools.video_pipeline import TRANSITION_OPTIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -139,11 +141,17 @@ TEMPLATE_FIELDS = [
     },
     {
         "field_name": "转场1",
-        "type": 1,  # 文本
+        "type": 3,  # 单选：选项与 video_pipeline.TRANSITION_OPTIONS 同源
+        "property": {
+            "options": [{"name": name} for name in TRANSITION_OPTIONS]
+        },
     },
     {
         "field_name": "转场2",
-        "type": 1,  # 文本
+        "type": 3,  # 单选：选项与 video_pipeline.TRANSITION_OPTIONS 同源
+        "property": {
+            "options": [{"name": name} for name in TRANSITION_OPTIONS]
+        },
     },
     {
         "field_name": "处理状态",
@@ -286,13 +294,30 @@ class BitableClient:
 LEGACY_FIELDS_TO_DELETE = ("文本", "单选", "日期", "字幕", "搜索框图片URL", "BGM URL")
 
 
+def _count_field_usage(client: "BitableClient", app_token: str, table_id: str, field_names: list) -> dict:
+    """统计每个字段在多少条记录里有值（用于判断哪列是空列）"""
+    counts = {n: 0 for n in field_names}
+    page_token = None
+    while True:
+        resp = client.search_records(app_token=app_token, table_id=table_id, page_token=page_token)
+        for item in resp.get("data", {}).get("items", []):
+            fields = item.get("fields", {})
+            for n in field_names:
+                if fields.get(n):
+                    counts[n] += 1
+        if not resp.get("data", {}).get("has_more"):
+            break
+        page_token = resp.get("data", {}).get("page_token")
+    return counts
+
+
 def migrate_bitable_schema(app_token: str, table_id: str) -> dict:
     """
     将已有表格的结构对齐到当前 TEMPLATE_FIELDS：
     1. 默认主列「文本」更名复用为「素材URL」（主列不可删除，只能改名）
-    2. 删除历史遗留的冗余列（仅删 LEGACY_FIELDS_TO_DELETE 中点名的）
-    3. 「引导语」改为含文案池选项的下拉单选
-    4. 补齐模板中缺失的列
+    2. 合并附件列：只保留「视频附件」（空列删除、有数据的列改名，不丢数据）
+    3. 删除历史遗留的冗余列（仅删 LEGACY_FIELDS_TO_DELETE 中点名的）
+    4. 对齐字段类型/下拉选项，补齐缺失列
 
     幂等：重复执行无副作用。
     """
@@ -314,7 +339,36 @@ def migrate_bitable_schema(app_token: str, table_id: str) -> dict:
         except Exception as e:
             actions.append(f"更名「文本」失败: {e}")
 
-    # 2. 删除冗余列
+    # 2. 合并附件列：只保留「视频附件」
+    if "附件" in existing:
+        try:
+            if "视频附件" not in existing:
+                client.update_field(
+                    app_token, table_id, existing["附件"]["field_id"],
+                    {"field_name": "视频附件", "type": 17},
+                )
+                existing["视频附件"] = existing.pop("附件")
+                actions.append("「附件」更名为「视频附件」")
+            else:
+                usage = _count_field_usage(client, app_token, table_id, ["附件", "视频附件"])
+                if usage["视频附件"] == 0:
+                    client.delete_field(app_token, table_id, existing["视频附件"]["field_id"])
+                    client.update_field(
+                        app_token, table_id, existing["附件"]["field_id"],
+                        {"field_name": "视频附件", "type": 17},
+                    )
+                    existing["视频附件"] = existing.pop("附件")
+                    actions.append("删除空的「视频附件」，「附件」更名为「视频附件」（原数据保留）")
+                elif usage["附件"] == 0:
+                    client.delete_field(app_token, table_id, existing["附件"]["field_id"])
+                    existing.pop("附件")
+                    actions.append("删除空的「附件」列")
+                else:
+                    actions.append("「附件」与「视频附件」均有数据，为避免丢数据未自动合并，请手动搬运后删除「附件」")
+        except Exception as e:
+            actions.append(f"合并附件列失败: {e}")
+
+    # 3. 删除冗余列
     for name in LEGACY_FIELDS_TO_DELETE:
         if name in existing:
             try:
@@ -324,26 +378,31 @@ def migrate_bitable_schema(app_token: str, table_id: str) -> dict:
             except Exception as e:
                 actions.append(f"删除「{name}」失败: {e}")
 
-    # 2. 「引导语」确保为下拉单选并刷新文案池选项
-    guide_def = next(f for f in TEMPLATE_FIELDS if f["field_name"] == "引导语")
-    if "引导语" in existing:
-        try:
-            client.update_field(
-                app_token, table_id, existing["引导语"]["field_id"],
-                {"field_name": "引导语", "type": guide_def["type"], "property": guide_def["property"]},
-            )
-            actions.append("「引导语」已设为下拉单选（10条文案池）")
-        except Exception as e:
-            actions.append(f"更新「引导语」失败: {e}")
-
-    # 3. 补齐缺失的模板列
+    # 4. 对齐字段类型/下拉选项，补齐缺失列
     for field_def in TEMPLATE_FIELDS:
-        if field_def["field_name"] not in existing:
+        name = field_def["field_name"]
+        if name in existing:
+            current = existing[name]
+            need_update = current.get("type") != field_def["type"]
+            template_options = {o["name"] for o in field_def.get("property", {}).get("options", [])}
+            if not need_update and template_options:
+                current_options = {o.get("name") for o in (current.get("property") or {}).get("options", [])}
+                need_update = current_options != template_options
+            if need_update:
+                try:
+                    body = {"field_name": name, "type": field_def["type"]}
+                    if "property" in field_def:
+                        body["property"] = field_def["property"]
+                    client.update_field(app_token, table_id, current["field_id"], body)
+                    actions.append(f"「{name}」类型/选项已对齐模板")
+                except Exception as e:
+                    actions.append(f"更新「{name}」失败: {e}")
+        else:
             try:
                 client.add_field(app_token=app_token, table_id=table_id, field=field_def)
-                actions.append(f"新增列「{field_def['field_name']}」")
+                actions.append(f"新增列「{name}」")
             except Exception as e:
-                actions.append(f"新增「{field_def['field_name']}」失败: {e}")
+                actions.append(f"新增「{name}」失败: {e}")
 
     final_fields = client.list_fields(app_token=app_token, table_id=table_id)
     field_names = [f["field_name"] for f in final_fields.get("data", {}).get("items", [])]

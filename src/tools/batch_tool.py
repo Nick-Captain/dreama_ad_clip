@@ -108,6 +108,7 @@ def batch_process_from_bitable(
     table_id: str,
     max_concurrency: int = 3,
     send_notification: bool = True,
+    record_id: str = "",
 ) -> str:
     """
     从飞书多维表格批量处理广告尾帧视频。
@@ -123,6 +124,7 @@ def batch_process_from_bitable(
     - table_id: 数据表的 table_id（必填）
     - max_concurrency: 最大并发数，默认3
     - send_notification: 是否发送飞书通知，默认True
+    - record_id: 只处理指定记录（可选，H5 单条处理用）
 
     返回：处理结果摘要的 JSON 字符串
     """
@@ -156,6 +158,9 @@ def batch_process_from_bitable(
             if not resp.get("data", {}).get("has_more"):
                 break
             page_token = resp.get("data", {}).get("page_token")
+
+        if record_id:
+            all_items = [it for it in all_items if it.get("record_id") == record_id]
 
         summary["total"] = len(all_items)
         logger.info(f"[批量处理] 共 {len(all_items)} 条待处理记录")

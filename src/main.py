@@ -295,6 +295,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# H5 中间帧编辑器接口
+from api.h5 import router as h5_router
+app.include_router(h5_router)
+
 # OpenAI 兼容接口处理器
 openai_handler = OpenAIChatHandler(service)
 

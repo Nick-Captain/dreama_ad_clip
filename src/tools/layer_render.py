@@ -148,6 +148,58 @@ def _combine_enable(a: Optional[str], b: Optional[str]) -> Optional[str]:
     return a or b
 
 
+def render_static_preview(
+    frame_path: str,
+    canvas_w: int,
+    canvas_h: int,
+    layer_doc: dict,
+    layer_context: dict | None,
+    search_box_image_url: str,
+    guide_text: str,
+    font_path: str,
+    output_path: str,
+) -> str:
+    """
+    H5「精确预览」：与成片同一渲染器输出静态合成图。
+    引导语整句显示（不分段）；动画/分段图层按静止状态叠加。
+    """
+    plan = build_freeze_render_plan(
+        frame_path=frame_path,
+        canvas_w=canvas_w,
+        canvas_h=canvas_h,
+        layer_doc=layer_doc,
+        layer_context=layer_context,
+        search_box_image_url=search_box_image_url,
+        subtitle_segments=[guide_text] if guide_text else [],
+        segment_durations=[1.0] if guide_text else [],
+        font_path=font_path,
+        tmp_dir=os.path.dirname(output_path) or ".",
+        uid=f"preview_{os.getpid()}_{abs(hash(output_path)) % 100000}",
+    )
+    base = Image.open(plan.base_path).convert("RGBA")
+    for spec in plan.overlays:
+        try:
+            ovl = Image.open(spec.path).convert("RGBA")
+            # 动画图层取静止基准位（表达式形如 "X+A*sin(...)"，取首项）
+            x = int(float(str(spec.x_expr).split("+")[0])) if spec.x_expr not in ("0",) else 0
+            y = int(float(str(spec.y_expr).split("+")[0])) if spec.y_expr not in ("0",) else 0
+            if ovl.size == base.size and x == 0 and y == 0:
+                base = Image.alpha_composite(base, ovl)
+            else:
+                base.paste(ovl, (x, y), ovl)
+        finally:
+            try:
+                os.remove(spec.path)
+            except Exception:
+                pass
+    try:
+        os.remove(plan.base_path)
+    except Exception:
+        pass
+    base.convert("RGB").save(output_path, "PNG")
+    return output_path
+
+
 def build_freeze_render_plan(
     frame_path: str,
     canvas_w: int,

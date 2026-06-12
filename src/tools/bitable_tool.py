@@ -268,6 +268,14 @@ class BitableClient:
             body["page_token"] = page_token
         return self._request("POST", f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/search", json_body=body)
 
+    def get_record(self, app_token: str, table_id: str, record_id: str) -> dict:
+        """读取单条记录"""
+        return self._request("GET", f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}")
+
+    def create_record(self, app_token: str, table_id: str, fields: dict) -> dict:
+        """新增单条记录"""
+        return self._request("POST", f"/bitable/v1/apps/{app_token}/tables/{table_id}/records", json_body={"fields": fields})
+
     def update_records(self, app_token: str, table_id: str, records: list) -> dict:
         """批量更新记录"""
         return self._request("POST", f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update", json_body={

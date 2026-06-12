@@ -1,0 +1,510 @@
+"""
+H5 中间帧编辑器后端接口
+
+设计要点：
+- 快速抽帧：跳过 AI 去字幕（秒级返回），按视频指纹缓存（h5_kv）
+- 精确预览：与成片同一渲染器（tools.layer_render）静态出图
+- 上传走原始字节流（octet-stream）而非 multipart，规避 python-multipart 依赖
+- 所有阻塞操作经 asyncio.to_thread，不卡事件循环
+"""
+
+import asyncio
+import hashlib
+import json
+import logging
+import os
+import subprocess
+import tempfile
+import threading
+import uuid
+from urllib.parse import urlparse
+
+from fastapi import APIRouter, HTTPException, Request
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v1/h5")
+
+DEFAULT_APP_TOKEN = os.getenv("DEFAULT_BITABLE_APP_TOKEN", "JOMibWw3wa6TzYsaHSIcAG27n2f")
+DEFAULT_TABLE_ID = os.getenv("DEFAULT_BITABLE_TABLE_ID", "tblWNUywhvrkJ54u")
+PUBLIC_BASE_URL = os.getenv(
+    "PUBLIC_BASE_URL",
+    "https://a0357594-98ce-46e4-a7fe-ac797d969b21.dev.coze.site",
+)
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm")
+
+FRAME_CACHE_PREFIX = "frame:"
+
+
+def _table_of(payload: dict) -> tuple:
+    return (
+        payload.get("app_token") or DEFAULT_APP_TOKEN,
+        payload.get("table_id") or DEFAULT_TABLE_ID,
+    )
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        return await request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+
+
+# ------------------------------------------------------------
+# 记录与视频源解析
+# ------------------------------------------------------------
+
+def _fetch_record_fields(app_token: str, table_id: str, record_id: str) -> dict:
+    from tools.bitable_tool import BitableClient
+    client = BitableClient()
+    resp = client.get_record(app_token, table_id, record_id)
+    return resp.get("data", {}).get("record", {}).get("fields", {})
+
+
+def _resolve_video_source(fields: dict) -> tuple:
+    """返回 (video_url, cache_key)。优先视频URL列，其次附件列。"""
+    from tools.bitable_tool import BitableClient, field_to_text, attachment_to_download_url
+    url = field_to_text(fields.get("视频URL")).strip()
+    if url:
+        parsed = urlparse(url)
+        return url, f"{parsed.netloc}{parsed.path}"
+    for att_name in ("视频附件", "附件"):
+        value = fields.get(att_name)
+        if not value:
+            continue
+        file_token = value[0].get("file_token", "") if isinstance(value, list) and isinstance(value[0], dict) else ""
+        download_url = attachment_to_download_url(BitableClient(), value)
+        if download_url:
+            return download_url, file_token or download_url
+    return "", ""
+
+
+def _record_summary(item: dict) -> dict:
+    from tools.bitable_tool import field_to_text
+    fields = item.get("fields", {})
+    name = ""
+    for att_name in ("视频附件", "附件"):
+        value = fields.get(att_name)
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            name = value[0].get("name", "")
+            break
+    if not name:
+        raw_url = field_to_text(fields.get("视频URL")).strip()
+        if raw_url:
+            name = os.path.basename(urlparse(raw_url).path) or raw_url[:40]
+    output = field_to_text(fields.get("输出视频URL")).strip()
+    return {
+        "record_id": item.get("record_id"),
+        "name": name or "(未命名素材)",
+        "role_name": field_to_text(fields.get("角色名")).strip(),
+        "guide_text": field_to_text(fields.get("引导语")).strip(),
+        "status": field_to_text(fields.get("处理状态")).strip(),
+        "output_video_url": output,
+        "preview_url": field_to_text(fields.get("预览图URL")).strip(),
+        "error": field_to_text(fields.get("错误信息")).strip(),
+        "has_style": bool(field_to_text(fields.get("样式参数")).strip()),
+    }
+
+
+# ------------------------------------------------------------
+# 快速抽帧（带缓存）
+# ------------------------------------------------------------
+
+def _probe_local(path: str) -> tuple:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-show_entries", "format=duration",
+         "-of", "json", path],
+        capture_output=True, text=True, timeout=30,
+    )
+    data = json.loads(out.stdout)
+    stream = data.get("streams", [{}])[0]
+    duration = float(data.get("format", {}).get("duration", 0) or 0)
+    return int(stream.get("width", 0)), int(stream.get("height", 0)), duration
+
+
+def _quick_frame(video_url: str, cache_key: str) -> dict:
+    from storage.database.db import get_session
+    from storage.database.shared.model import H5KeyValue
+    from tools.video_pipeline import (
+        _download_file, _extract_frame_at_time, _is_black_frame, _upload_image_to_s3,
+    )
+
+    digest = hashlib.md5(cache_key.encode("utf-8")).hexdigest()[:20]
+    kv_key = FRAME_CACHE_PREFIX + digest
+
+    try:
+        session = get_session()
+        try:
+            row = session.get(H5KeyValue, kv_key)
+            if row and isinstance(row.value, dict) and row.value.get("frame_url"):
+                return {**row.value, "cached": True}
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning(f"[h5/frame] 缓存读取失败: {e}")
+
+    uid = uuid.uuid4().hex[:10]
+    tmp_dir = tempfile.gettempdir()
+    tmp_v = os.path.join(tmp_dir, f"h5src_{uid}.mp4")
+    frame_path = os.path.join(tmp_dir, f"h5frame_{uid}.png")
+    try:
+        _download_file(video_url, tmp_v)
+        width, height, duration = _probe_local(tmp_v)
+        if not width or not height:
+            raise RuntimeError("无法读取视频分辨率")
+        seek = max(0, duration - 0.1)
+        _extract_frame_at_time(tmp_v, seek, frame_path)
+        if _is_black_frame(frame_path):
+            for step in range(1, 11):
+                back = max(0, duration - 0.1 - step * 0.5)
+                if back <= 0:
+                    break
+                _extract_frame_at_time(tmp_v, back, frame_path)
+                if not _is_black_frame(frame_path):
+                    break
+        frame_url = _upload_image_to_s3(frame_path, f"h5/frames/{digest}.png")
+    finally:
+        for p in (tmp_v, frame_path):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+    result = {"frame_url": frame_url, "width": width, "height": height}
+    try:
+        session = get_session()
+        try:
+            row = session.get(H5KeyValue, kv_key)
+            if row is None:
+                session.add(H5KeyValue(key=kv_key, value=result))
+            else:
+                row.value = result
+            session.commit()
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning(f"[h5/frame] 缓存写入失败: {e}")
+    return {**result, "cached": False}
+
+
+@router.post("/frame")
+async def api_frame(request: Request):
+    """快速抽取记录视频的最后一帧（跳过AI去字幕，结果按视频指纹缓存）"""
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+    record_id = payload.get("record_id", "")
+    video_url = payload.get("video_url", "")
+
+    def _run():
+        url, cache_key = video_url, video_url and urlparse(video_url).path or ""
+        if record_id:
+            fields = _fetch_record_fields(app_token, table_id, record_id)
+            url, cache_key = _resolve_video_source(fields)
+        if not url:
+            raise HTTPException(status_code=400, detail="记录没有可用的视频来源（视频URL/视频附件均为空）")
+        return _quick_frame(url, cache_key or url)
+
+    return await asyncio.to_thread(_run)
+
+
+# ------------------------------------------------------------
+# 样式参数读写
+# ------------------------------------------------------------
+
+@router.post("/params/get")
+async def api_params_get(request: Request):
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+    record_id = payload.get("record_id", "")
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id 必填")
+
+    def _run():
+        from tools.bitable_tool import field_to_text, GUIDE_TEXT_OPTIONS, attachment_to_download_url, BitableClient
+        from tools.layer_model import parse_layer_doc, resolve_layer_doc
+        from tools.h5_store import get_global_layer_doc
+        fields = _fetch_record_fields(app_token, table_id, record_id)
+        record_raw = field_to_text(fields.get("样式参数"))
+        global_doc = get_global_layer_doc()
+        doc = resolve_layer_doc(record_raw, global_doc)
+        if parse_layer_doc(record_raw):
+            source = "record"
+        elif global_doc:
+            source = "global"
+        else:
+            source = "builtin"
+        search_box_url = ""
+        if fields.get("搜索框图片"):
+            try:
+                search_box_url = attachment_to_download_url(BitableClient(), fields.get("搜索框图片"))
+            except Exception as e:
+                logger.warning(f"[h5/params] 搜索框附件读取失败: {e}")
+        if not search_box_url:
+            search_box_url = field_to_text(fields.get("搜索框图片URL")).strip()
+        return {
+            "layer_doc": doc,
+            "source": source,
+            "context": {"角色名": field_to_text(fields.get("角色名")).strip()},
+            "guide_text": field_to_text(fields.get("引导语")).strip(),
+            "guide_options": GUIDE_TEXT_OPTIONS,
+            "search_box_url": search_box_url,
+            "record": _record_summary({"record_id": record_id, "fields": fields}),
+        }
+
+    return await asyncio.to_thread(_run)
+
+
+@router.post("/params/save")
+async def api_params_save(request: Request):
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+    record_id = payload.get("record_id", "")
+    layer_doc = payload.get("layer_doc")
+    if not record_id or not isinstance(layer_doc, dict):
+        raise HTTPException(status_code=400, detail="record_id 和 layer_doc 必填")
+
+    def _run():
+        from tools.bitable_tool import BitableClient
+        from tools.layer_model import parse_layer_doc
+        from tools.h5_store import set_global_layer_doc
+        raw = json.dumps(layer_doc, ensure_ascii=False)
+        if parse_layer_doc(raw) is None:
+            raise HTTPException(status_code=400, detail="layer_doc 不是合法的图层文档")
+        client = BitableClient()
+        update_fields = {"样式参数": raw}
+        guide_text = payload.get("guide_text")
+        if isinstance(guide_text, str):
+            update_fields["引导语"] = guide_text
+        client.update_records(app_token, table_id, [{"record_id": record_id, "fields": update_fields}])
+        saved_default = False
+        if payload.get("set_as_default"):
+            set_global_layer_doc(layer_doc)
+            saved_default = True
+        return {"success": True, "set_as_default": saved_default}
+
+    return await asyncio.to_thread(_run)
+
+
+# ------------------------------------------------------------
+# 精确预览
+# ------------------------------------------------------------
+
+@router.post("/render")
+async def api_render(request: Request):
+    """服务端精确预览：与成片同一渲染器输出静态合成图"""
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+    frame_url = payload.get("frame_url", "")
+    layer_doc = payload.get("layer_doc")
+    if not frame_url or not isinstance(layer_doc, dict):
+        raise HTTPException(status_code=400, detail="frame_url 和 layer_doc 必填")
+
+    def _run():
+        from tools.layer_render import render_static_preview
+        from tools.video_pipeline import _download_file, _upload_image_to_s3, _find_chinese_font
+        from PIL import Image
+        uid = uuid.uuid4().hex[:10]
+        tmp_dir = tempfile.gettempdir()
+        frame_path = os.path.join(tmp_dir, f"h5pf_{uid}.png")
+        out_path = os.path.join(tmp_dir, f"h5pv_{uid}.png")
+        try:
+            _download_file(frame_url, frame_path)
+            with Image.open(frame_path) as im:
+                width, height = im.size
+            render_static_preview(
+                frame_path=frame_path,
+                canvas_w=width,
+                canvas_h=height,
+                layer_doc=layer_doc,
+                layer_context=payload.get("context") or {},
+                search_box_image_url=payload.get("search_box_url", ""),
+                guide_text=payload.get("guide_text", ""),
+                font_path=_find_chinese_font(),
+                output_path=out_path,
+            )
+            preview_url = _upload_image_to_s3(out_path, f"h5/previews/pv_{uid}.png")
+        finally:
+            for p in (frame_path, out_path):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+        record_id = payload.get("record_id", "")
+        if record_id:
+            try:
+                from tools.bitable_tool import BitableClient
+                BitableClient().update_records(
+                    app_token, table_id,
+                    [{"record_id": record_id, "fields": {"预览图URL": preview_url}}],
+                )
+            except Exception as e:
+                logger.warning(f"[h5/render] 预览图URL写回失败: {e}")
+        return {"preview_url": preview_url}
+
+    return await asyncio.to_thread(_run)
+
+
+# ------------------------------------------------------------
+# 素材库与上传
+# ------------------------------------------------------------
+
+@router.post("/assets/upload")
+async def api_asset_upload(request: Request, filename: str = "asset.png"):
+    """上传图片素材（原始字节流），入共享素材库"""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in IMAGE_EXTS:
+        raise HTTPException(status_code=400, detail=f"仅支持图片格式: {IMAGE_EXTS}")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="空文件")
+    if len(body) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片不能超过20MB")
+
+    def _run():
+        from tools.video_pipeline import _get_storage
+        storage = _get_storage()
+        from io import BytesIO
+        key = storage.stream_upload_file(
+            fileobj=BytesIO(body),
+            file_name=f"h5/assets/{uuid.uuid4().hex[:10]}{ext}",
+            content_type=f"image/{ext.lstrip('.').replace('jpg', 'jpeg')}",
+        )
+        url = storage.generate_presigned_url(key=key, expire_time=2592000)
+        from tools.h5_store import add_asset
+        return add_asset(name=filename, url=url, content_type=f"image/{ext.lstrip('.')}")
+
+    return await asyncio.to_thread(_run)
+
+
+@router.get("/assets")
+async def api_assets():
+    def _run():
+        from tools.h5_store import list_assets
+        return {"assets": list_assets()}
+    return await asyncio.to_thread(_run)
+
+
+@router.post("/upload-video")
+async def api_upload_video(request: Request, filename: str = "video.mp4"):
+    """上传视频（原始字节流）→ 存对象存储 → 自动创建表格记录"""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in VIDEO_EXTS:
+        raise HTTPException(status_code=400, detail=f"仅支持视频格式: {VIDEO_EXTS}")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="空文件")
+    if len(body) > 200 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="视频不能超过200MB")
+
+    def _run():
+        from tools.video_pipeline import _get_storage
+        from tools.bitable_tool import BitableClient
+        from io import BytesIO
+        storage = _get_storage()
+        key = storage.stream_upload_file(
+            fileobj=BytesIO(body),
+            file_name=f"h5/videos/{uuid.uuid4().hex[:10]}{ext}",
+            content_type="video/mp4",
+        )
+        url = storage.generate_presigned_url(key=key, expire_time=2592000)
+        client = BitableClient()
+        resp = client.create_record(DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID, {"视频URL": url})
+        record_id = resp.get("data", {}).get("record", {}).get("record_id", "")
+        return {"success": True, "record_id": record_id, "video_url": url, "name": filename}
+
+    return await asyncio.to_thread(_run)
+
+
+# ------------------------------------------------------------
+# 记录列表与单条处理
+# ------------------------------------------------------------
+
+@router.post("/records")
+async def api_records(request: Request):
+    """记录列表（H5 首页），顺带回填缺失的「调整链接」"""
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+
+    def _run():
+        from tools.bitable_tool import BitableClient
+        client = BitableClient()
+        items, page_token = [], None
+        while True:
+            resp = client.search_records(app_token=app_token, table_id=table_id, page_token=page_token)
+            items.extend(resp.get("data", {}).get("items", []))
+            if not resp.get("data", {}).get("has_more"):
+                break
+            page_token = resp.get("data", {}).get("page_token")
+
+        backfill = []
+        for item in items:
+            if not item.get("fields", {}).get("调整链接"):
+                link = f"{PUBLIC_BASE_URL}/h5/?record_id={item.get('record_id')}"
+                backfill.append({
+                    "record_id": item.get("record_id"),
+                    "fields": {"调整链接": {"link": link, "text": "调整样式"}},
+                })
+        if backfill:
+            try:
+                client.update_records(app_token, table_id, backfill)
+            except Exception as e:
+                logger.warning(f"[h5/records] 调整链接回填失败: {e}")
+
+        return {"records": [_record_summary(it) for it in items]}
+
+    return await asyncio.to_thread(_run)
+
+
+@router.post("/process")
+async def api_process(request: Request):
+    """单条记录触发处理：置为待处理后后台执行，H5 轮询状态"""
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+    record_id = payload.get("record_id", "")
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id 必填")
+
+    def _kickoff():
+        from tools.bitable_tool import BitableClient
+        BitableClient().update_records(
+            app_token, table_id,
+            [{"record_id": record_id, "fields": {"处理状态": "待处理"}}],
+        )
+
+    await asyncio.to_thread(_kickoff)
+
+    def _background():
+        try:
+            from tools.batch_tool import batch_process_from_bitable
+            batch_process_from_bitable.invoke({
+                "app_token": app_token,
+                "table_id": table_id,
+                "record_id": record_id,
+                "max_concurrency": 1,
+                "send_notification": False,
+            })
+        except Exception as e:
+            logger.error(f"[h5/process] 单条处理失败 record_id={record_id}: {e}", exc_info=True)
+
+    threading.Thread(target=_background, daemon=True).start()
+    return {"started": True, "record_id": record_id}
+
+
+@router.post("/record-status")
+async def api_record_status(request: Request):
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+    record_id = payload.get("record_id", "")
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id 必填")
+
+    def _run():
+        fields = _fetch_record_fields(app_token, table_id, record_id)
+        return _record_summary({"record_id": record_id, "fields": fields})
+
+    return await asyncio.to_thread(_run)

@@ -373,7 +373,8 @@ def _extract_frame_at_time(video_path: str, seek_time: float, output_path: str) 
     return output_path
 
 
-def _extract_clean_last_frame(video_url: str, output_path: str, video_w: int, video_h: int, uid: str) -> str:
+def _extract_clean_last_frame(video_url: str, output_path: str, video_w: int, video_h: int, uid: str,
+                              skip_subtitle_removal: bool = False) -> str:
     """
     提取视频干净的最后帧（无黑屏、无字幕）：
 
@@ -382,6 +383,8 @@ def _extract_clean_last_frame(video_url: str, output_path: str, video_w: int, vi
     2. 检测是否黑屏 → 是：向前回退 0.5s（最多 5s）找非黑帧
     3. 检测是否有字幕 → 是：用 Seedream 4.0 去字幕
     4. 返回干净帧
+
+    skip_subtitle_removal=True 时跳过第 3 步（H5 快速预览用，秒级返回）
     """
     tmp_v = os.path.join(tempfile.gettempdir(), f"lastframe_src_{uid}.mp4")
     _download_file(video_url, tmp_v)
@@ -411,6 +414,9 @@ def _extract_clean_last_frame(video_url: str, output_path: str, video_w: int, vi
             logger.warning(f"[{uid}] 回退范围内均为黑屏，使用回退最远的帧")
 
     # Step 3: 字幕检测 → Seedream 4.0 去字幕
+    if skip_subtitle_removal:
+        os.remove(tmp_v)
+        return output_path
     if _frame_has_subtitle(output_path):
         logger.info(f"[{uid}] 帧画面有字幕，使用 Seedream 4.0 去除")
         _remove_subtitle_with_seedream(output_path, output_path, video_w, video_h, uid)

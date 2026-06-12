@@ -295,9 +295,26 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# H5 中间帧编辑器接口
+# H5 中间帧编辑器：接口 + 静态页面
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from api.h5 import router as h5_router
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(h5_router)
+
+_h5_static_dir = os.path.join(
+    os.getenv("COZE_WORKSPACE_PATH", "/workspace/projects"), "static", "h5"
+)
+if os.path.isdir(_h5_static_dir):
+    app.mount("/h5", StaticFiles(directory=_h5_static_dir, html=True), name="h5")
+else:
+    logger.warning(f"H5 静态目录不存在，未挂载: {_h5_static_dir}")
 
 # OpenAI 兼容接口处理器
 openai_handler = OpenAIChatHandler(service)

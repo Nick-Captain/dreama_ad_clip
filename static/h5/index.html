@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>中间帧编辑器 · 造梦次元</title>
+<script src="https://cdn.jsdelivr.net/npm/konva@9.3.16/konva.min.js"></script>
+<style>
+:root, html[data-theme="dark"] {
+  --bg: #242424; --stage-bg: #1A1A1A; --card: #2E2E2E; --card2: #383838;
+  --border: #3C3C3C; --text: #F8F8F8; --muted: #A8A8A8;
+  --brand: #06C755; --brand-deep: #037C40; --mint: #9EF2B7; --forest: #074F25;
+  --orange: #FF830F; --yellow: #FFE23C; --blue: #45C7FF; --danger: #E24B4A;
+}
+html[data-theme="light"] {
+  --bg: #F0F0F0; --stage-bg: #E4E4E4; --card: #FFFFFF; --card2: #F8F8F8;
+  --border: #E0E0E0; --text: #242424; --muted: #7A7A7A;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg); color: var(--text); min-height: 100vh;
+  font-family: "OPPO Sans", "MiSans", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+}
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; border-bottom: 1px solid var(--border); gap: 10px; flex-wrap: wrap;
+}
+.logo { display: flex; align-items: center; gap: 9px; font-weight: 600; }
+.ring { width: 22px; height: 22px; border-radius: 50%; background: #fff; border: 4px solid var(--brand); flex: none; }
+.fileinfo { font-size: 12px; color: var(--muted); background: var(--card); padding: 3px 10px; border-radius: 99px; }
+.hbtns { display: flex; gap: 8px; align-items: center; }
+button {
+  font-family: inherit; font-size: 13px; color: var(--text); background: transparent;
+  border: 1px solid var(--border); border-radius: 9px; padding: 6px 12px; cursor: pointer;
+}
+button:hover { background: var(--card); }
+button.primary { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
+button.primary:hover { background: var(--brand-deep); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.toggle { display: inline-flex; background: var(--card); border-radius: 99px; padding: 2px; cursor: pointer; }
+.toggle span { font-size: 12px; padding: 3px 10px; border-radius: 99px; color: var(--muted); }
+.toggle span.on { background: var(--text); color: var(--bg); }
+main { padding: 14px 16px; }
+/* 首页 */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin-top: 12px; }
+.card { background: var(--card); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.card .nm { font-weight: 600; word-break: break-all; }
+.badge { font-size: 11px; padding: 2px 9px; border-radius: 99px; display: inline-block; }
+.b-wait { background: var(--yellow); color: #633806; }
+.b-run { background: var(--blue); color: #042C53; }
+.b-ok { background: var(--mint); color: var(--forest); }
+.b-fail { background: var(--danger); color: #fff; }
+.b-none { background: var(--card2); color: var(--muted); }
+.uploadbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.muted { color: var(--muted); font-size: 12px; }
+/* 编辑器 */
+#view-editor { display: flex; gap: 14px; align-items: flex-start; }
+#stage-wrap { flex: none; background: var(--stage-bg); border-radius: 12px; padding: 14px; display: flex; align-items: center; justify-content: center; }
+#panel { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.chip {
+  font-size: 12px; padding: 5px 11px; border-radius: 9px; background: var(--card);
+  cursor: pointer; border: 1px solid transparent; display: flex; gap: 5px; align-items: center;
+}
+.chip.sel { background: var(--brand); color: #fff; font-weight: 600; }
+.chip .eye { opacity: 0.7; }
+.chip.hid { opacity: 0.45; }
+.props { background: var(--card); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 9px; }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.row label { font-size: 12px; color: var(--muted); min-width: 52px; flex: none; }
+.row input[type="range"] { flex: 1; min-width: 80px; accent-color: var(--brand); }
+.val { font-size: 12px; background: var(--bg); border-radius: 6px; padding: 2px 7px; min-width: 38px; text-align: center; }
+select, input[type="text"], input[type="number"] {
+  font-family: inherit; font-size: 12px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px;
+}
+select { max-width: 100%; }
+.sw { width: 20px; height: 20px; border-radius: 50%; cursor: pointer; border: 1px solid var(--border); flex: none; }
+.sw.sel { outline: 2px solid var(--brand); outline-offset: 2px; }
+input[type="color"] { width: 26px; height: 26px; border: none; background: none; cursor: pointer; padding: 0; }
+.hex { width: 80px; font-family: monospace; }
+.subcard { background: var(--bg); border-radius: 10px; padding: 9px 10px; display: flex; flex-direction: column; gap: 8px; }
+.subcard .tt { font-size: 12px; color: var(--muted); font-weight: 600; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.actions .primary { margin-left: auto; }
+#status { font-size: 12px; color: var(--muted); }
+#status a { color: var(--brand); }
+/* 弹层 */
+#modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 50; padding: 16px; }
+#modal { background: var(--card); border-radius: 14px; padding: 16px; max-width: 92vw; max-height: 88vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+#modal img.pv { max-width: 78vw; max-height: 70vh; border-radius: 8px; }
+.assets { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; }
+.assets .a { background: var(--bg); border-radius: 8px; padding: 6px; cursor: pointer; text-align: center; }
+.assets .a img { width: 100%; height: 64px; object-fit: contain; }
+.assets .a div { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 18px; border-radius: 99px; font-size: 13px; display: none; z-index: 99; }
+@media (max-width: 760px) {
+  #view-editor { flex-direction: column; }
+  #stage-wrap { width: 100%; }
+  header { padding: 8px 10px; }
+  main { padding: 10px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><span class="ring"></span><span>中间帧编辑器</span></div>
+  <span class="fileinfo" id="fileinfo">造梦次元 · 广告尾帧工作台</span>
+  <div class="hbtns">
+    <span class="toggle" id="themeToggle"><span data-t="dark">深色</span><span data-t="light">浅色</span></span>
+    <button id="btnHome">记录列表</button>
+    <button id="btnUploadTop">上传视频</button>
+  </div>
+</header>
+
+<main id="view-home">
+  <div class="uploadbar">
+    <button class="primary" id="btnUpload">上传视频建任务</button>
+    <input type="file" id="fileVideo" accept="video/mp4,video/quicktime" style="display:none">
+    <span class="muted" id="upmsg">支持 mp4/mov，最大 500MB（自动分片上传）</span>
+  </div>
+  <div class="grid" id="records"></div>
+</main>
+
+<main id="view-editor" style="display:none">
+  <div id="stage-wrap"><div id="stage"></div></div>
+  <aside id="panel">
+    <div class="chips" id="chips"></div>
+    <div class="chips">
+      <button id="btnAddText">+ 字幕</button>
+      <button id="btnAddImage">+ 图片</button>
+    </div>
+    <div class="props" id="props"></div>
+    <div class="actions">
+      <button id="btnRender">精确预览</button>
+      <button id="btnSave">保存样式</button>
+      <button id="btnDefault">设为默认</button>
+      <button class="primary" id="btnProcess">提交处理</button>
+    </div>
+    <div id="status"></div>
+  </aside>
+</main>
+
+<div id="modal-bg"><div id="modal"></div></div>
+<div id="toast"></div>
+<input type="file" id="fileImage" accept="image/*" style="display:none">
+
+<script>
+const API = location.hostname.endsWith('coze.site') ? '' : 'https://a0357594-98ce-46e4-a7fe-ac797d969b21.dev.coze.site';
+const SWATCHES = ['#FFFFFF', '#242424', '#06C755', '#FFE23C', '#FF830F', '#45C7FF'];
+const TRANSITION_NOTE = null;
+
+const S = {
+  recordId: '', frame: null, doc: null, ctx: {}, guideText: '', guideOptions: [],
+  searchBoxUrl: '', nodes: new Map(), selId: '', stage: null, layerK: null,
+  scale: 1, anim: null, polling: null,
+};
+
+function $(id) { return document.getElementById(id); }
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2600);
+}
+async function api(path, body, method) {
+  const resp = await fetch(API + path, {
+    method: method || 'POST',
+    headers: body instanceof Blob ? {} : { 'Content-Type': 'application/json' },
+    body: body instanceof Blob ? body : (body ? JSON.stringify(body) : '{}'),
+  });
+  if (!resp.ok) {
+    let detail = resp.statusText;
+    try { detail = (await resp.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return resp.json();
+}
+
+/* ---------- 主题 ---------- */
+function setTheme(t) {
+  document.documentElement.setAttribute('data-theme', t);
+  localStorage.setItem('h5-theme', t);
+  document.querySelectorAll('#themeToggle span').forEach(s =>
+    s.classList.toggle('on', s.dataset.t === t));
+}
+$('themeToggle').addEventListener('click', e => {
+  if (e.target.dataset.t) setTheme(e.target.dataset.t);
+});
+setTheme(localStorage.getItem('h5-theme') || 'dark');
+
+/* ---------- 首页 ---------- */
+async function showHome() {
+  $('view-home').style.display = '';
+  $('view-editor').style.display = 'none';
+  $('fileinfo').textContent = '造梦次元 · 广告尾帧工作台';
+  history.replaceState(null, '', location.pathname);
+  $('records').innerHTML = '<span class="muted">加载中…</span>';
+  try {
+    const data = await api('/api/v1/h5/records', {});
+    const rows = data.records || [];
+    if (!rows.length) { $('records').innerHTML = '<span class="muted">暂无记录，先上传一个视频吧</span>'; return; }
+    $('records').innerHTML = '';
+    rows.forEach(r => {
+      const div = document.createElement('div'); div.className = 'card';
+      const badge = { '待处理': 'b-wait', '处理中': 'b-run', '成功': 'b-ok', '失败': 'b-fail' }[r.status] || 'b-none';
+      div.innerHTML = `
+        <span class="nm">${r.name}</span>
+        <span><span class="badge ${badge}">${r.status || '未处理'}</span>
+        ${r.has_style ? '<span class="badge b-none">已调样式</span>' : ''}</span>
+        <span class="muted">${r.role_name ? '角色：' + r.role_name : ''}</span>
+        <div class="row">
+          <button class="primary" data-act="edit">调整样式</button>
+          ${r.output_video_url ? `<button data-act="out">查看成片</button>` : ''}
+        </div>`;
+      div.querySelector('[data-act="edit"]').onclick = () => openEditor(r.record_id);
+      const ob = div.querySelector('[data-act="out"]');
+      if (ob) ob.onclick = () => window.open(r.output_video_url, '_blank');
+      $('records').appendChild(div);
+    });
+  } catch (e) { $('records').innerHTML = `<span class="muted">加载失败：${e.message}</span>`; }
+}
+
+/* ---------- 分片上传 ---------- */
+async function uploadVideo(file) {
+  const msg = $('upmsg');
+  try {
+    msg.textContent = '初始化上传…';
+    const init = await api('/api/v1/h5/upload-video/init', {});
+    const cs = init.chunk_size;
+    for (let off = 0, i = 0; off < file.size; off += cs, i++) {
+      msg.textContent = `上传中 ${Math.round(Math.min(off + cs, file.size) / file.size * 100)}%`;
+      await api(`/api/v1/h5/upload-video/chunk?upload_id=${init.upload_id}&index=${i}`, file.slice(off, off + cs));
+    }
+    msg.textContent = '合成记录中…';
+    const fin = await api('/api/v1/h5/upload-video/finish', { upload_id: init.upload_id, filename: file.name });
+    msg.textContent = '上传完成';
+    toast('上传成功，进入编辑器');
+    openEditor(fin.record_id);
+  } catch (e) { msg.textContent = '上传失败：' + e.message; toast('上传失败'); }
+}
+$('btnUpload').onclick = () => $('fileVideo').click();
+$('btnUploadTop').onclick = () => { $('fileVideo').click(); };
+$('fileVideo').onchange = e => { if (e.target.files[0]) uploadVideo(e.target.files[0]); e.target.value = ''; };
+$('btnHome').onclick = () => { stopPoll(); showHome(); };
+
+/* ---------- 编辑器 ---------- */
+async function openEditor(recordId) {
+  S.recordId = recordId;
+  history.replaceState(null, '', `${location.pathname}?record_id=${recordId}`);
+  $('view-home').style.display = 'none';
+  $('view-editor').style.display = 'flex';
+  $('props').innerHTML = '<span class="muted">加载中…（首次抽帧约5秒）</span>';
+  $('chips').innerHTML = ''; $('status').textContent = '';
+  try {
+    const [params, frame] = await Promise.all([
+      api('/api/v1/h5/params/get', { record_id: recordId }),
+      api('/api/v1/h5/frame', { record_id: recordId }),
+    ]);
+    S.doc = params.layer_doc; S.ctx = params.context || {};
+    S.guideText = params.guide_text || '';
+    S.guideOptions = params.guide_options || [];
+    S.searchBoxUrl = params.search_box_url || '';
+    S.frame = frame;
+    $('fileinfo').textContent = `${params.record.name} · ${frame.width}×${frame.height}`;
+    buildStage();
+  } catch (e) {
+    $('props').innerHTML = `<span class="muted">加载失败：${e.message}</span>`;
+  }
+}
+
+function loadImg(url) {
+  // 不设置 crossOrigin：TOS 预签名链接不带 CORS 头，画布仅展示不导出，污染无影响
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img); img.onerror = rej; img.src = url;
+  });
+}
+
+function stageSize() {
+  const isMobile = window.innerWidth <= 760;
+  const maxW = isMobile ? window.innerWidth - 48 : Math.min(420, window.innerWidth * 0.4);
+  const maxH = isMobile ? window.innerHeight * 0.52 : window.innerHeight - 170;
+  return Math.min(maxW / S.frame.width, maxH / S.frame.height);
+}
+
+async function buildStage() {
+  if (S.stage) { S.stage.destroy(); S.stage = null; }
+  if (S.anim) { S.anim.stop(); S.anim = null; }
+  S.nodes.clear();
+  S.scale = stageSize();
+  const W = Math.round(S.frame.width * S.scale), H = Math.round(S.frame.height * S.scale);
+  S.stage = new Konva.Stage({ container: 'stage', width: W, height: H });
+  S.layerK = new Konva.Layer();
+  S.stage.add(S.layerK);
+  try {
+    const bg = await loadImg(S.frame.frame_url);
+    S.layerK.add(new Konva.Image({ image: bg, width: W, height: H, listening: false }));
+  } catch (e) { toast('帧图片加载失败'); }
+  S.tr = new Konva.Transformer({
+    rotateEnabled: false, keepRatio: true, enabledAnchors: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
+    anchorFill: '#06C755', anchorStroke: '#06C755', borderStroke: '#06C755', anchorSize: 9,
+  });
+  S.layerK.add(S.tr);
+  for (const layer of S.doc.layers) await addNode(layer);
+  S.layerK.draw();
+  startAnim();
+  renderChips();
+  select(S.doc.layers[0] ? lid(S.doc.layers[0]) : '');
+  S.stage.on('click tap', e => { if (e.target === S.stage || !e.target.getAttr('lid')) select(''); });
+}
+
+let _lidSeq = 0;
+function lid(layer) { if (!layer._lid) layer._lid = layer.id || ('ly' + (++_lidSeq)); return layer._lid; }
+function layerName(l) {
+  if (l.type === 'search_box') return '搜索框';
+  if (l.type === 'guide_subtitle') return '引导语';
+  if (l.type === 'text') return l.text_source === '角色名' ? '角色名' : '字幕';
+  if (l.type === 'image') return '图片';
+  return l.type;
+}
+function textOf(l) {
+  if (l.type === 'guide_subtitle') return S.guideText || '（留空=随机文案）';
+  if (l.text_source && l.text_source !== '自定义') return S.ctx[l.text_source] || `（${l.text_source}为空）`;
+  return l.text || '双击修改文案';
+}
+
+async function addNode(layer) {
+  const W = S.stage.width(), H = S.stage.height();
+  const id = lid(layer);
+  let node = null;
+  if (layer.type === 'search_box') {
+    if (!S.searchBoxUrl) return;
+    try {
+      const img = await loadImg(S.searchBoxUrl);
+      const w = W * (layer.scale ?? 0.7), h = img.height * (w / img.width);
+      node = new Konva.Image({ image: img, width: w, height: h,
+        x: W * (layer.x ?? 0.5) - w / 2, y: H * (layer.y ?? 0.15), draggable: true });
+    } catch (e) { return; }
+  } else if (layer.type === 'image') {
+    if (!layer.url) return;
+    try {
+      const img = await loadImg(layer.url);
+      const w = W * (layer.scale ?? 0.2), h = img.height * (w / img.width);
+      node = new Konva.Image({ image: img, width: w, height: h,
+        x: W * (layer.x ?? 0.5) - w / 2, y: H * (layer.y ?? 0.5) - h / 2, draggable: true });
+    } catch (e) { return; }
+  } else {
+    node = new Konva.Text({
+      text: textOf(layer), fontSize: Math.max(10, W * (layer.size ?? 0.06)),
+      fontFamily: getComputedStyle(document.body).fontFamily,
+      fill: layer.color || '#FFFFFF', draggable: true, fontStyle: 'bold',
+    });
+    applyTextStyle(node, layer);
+    node.x(W * (layer.x ?? 0.5) - node.width() / 2);
+    node.y(H * (layer.y ?? 0.7) - node.height() / 2);
+  }
+  node.setAttr('lid', id);
+  node.visible(layer.visible !== false);
+  node.on('click tap', () => select(id));
+  node.on('dragend transformend', () => syncBack(layer, node));
+  S.nodes.set(id, node);
+  S.layerK.add(node);
+  if (S.tr) S.tr.moveToTop();
+}
+
+function applyTextStyle(node, layer) {
+  node.fill(layer.color || '#FFFFFF');
+  const st = layer.stroke;
+  node.stroke(st && st.width ? (st.color || '#000') : null);
+  node.strokeWidth(st && st.width ? st.width * S.scale * 2 : 0);
+  node.fillAfterStrokeEnabled(true);
+  const sh = layer.shadow;
+  node.shadowColor(sh ? (sh.color || '#000') : 'transparent');
+  node.shadowOpacity(sh ? (sh.opacity ?? 0.6) : 0);
+  node.shadowBlur(sh ? (sh.blur ?? 4) * S.scale : 0);
+  node.shadowOffset(sh ? { x: 2, y: 2 } : { x: 0, y: 0 });
+}
+
+function syncBack(layer, node) {
+  const W = S.stage.width(), H = S.stage.height();
+  if (layer.type === 'search_box') {
+    const w = node.width() * node.scaleX();
+    layer.scale = +(w / W).toFixed(4);
+    layer.x = +((node.x() + w / 2) / W).toFixed(4);
+    layer.y = +(node.y() / H).toFixed(4);
+  } else if (layer.type === 'image') {
+    const w = node.width() * node.scaleX(), h = node.height() * node.scaleY();
+    layer.scale = +(w / W).toFixed(4);
+    layer.x = +((node.x() + w / 2) / W).toFixed(4);
+    layer.y = +((node.y() + h / 2) / H).toFixed(4);
+  } else {
+    layer.x = +((node.x() + node.width() / 2) / W).toFixed(4);
+    layer.y = +((node.y() + node.height() / 2) / H).toFixed(4);
+  }
+  renderProps();
+}
+
+function startAnim() {
+  S.anim = new Konva.Animation(frame => {
+    const t = frame.time / 1000;
+    for (const layer of S.doc.layers) {
+      if (layer.type !== 'image' || !layer.animation || !layer.animation.type) continue;
+      const node = S.nodes.get(lid(layer));
+      if (!node) continue;
+      const a = layer.animation, W = S.stage.width(), H = S.stage.height();
+      if (a.type === 'shake') node.offsetX(-Math.sin(2 * Math.PI * (a.speed || 8) * t) * W * (a.amplitude || 0.012));
+      else node.offsetX(0);
+      if (a.type === 'float') node.offsetY(-Math.sin(2 * Math.PI * (a.speed || 0.8) * t) * H * (a.amplitude || 0.018));
+      else if (a.type !== 'shake') node.offsetY(0);
+      if (a.type === 'blink') node.opacity((t % 0.9) < 0.55 ? 1 : 0.15);
+      else node.opacity(1);
+    }
+  }, S.layerK);
+  S.anim.start();
+}
+
+/* ---------- 图层选择与属性面板 ---------- */
+function renderChips() {
+  const c = $('chips'); c.innerHTML = '';
+  S.doc.layers.forEach(l => {
+    const chip = document.createElement('span');
+    chip.className = 'chip' + (lid(l) === S.selId ? ' sel' : '') + (l.visible === false ? ' hid' : '');
+    chip.innerHTML = `<span>${layerName(l)}</span><span class="eye">${l.visible === false ? '🚫' : '👁'}</span>`;
+    chip.querySelector('.eye').onclick = e => {
+      e.stopPropagation();
+      l.visible = l.visible === false;
+      const n = S.nodes.get(lid(l)); if (n) n.visible(l.visible);
+      renderChips();
+    };
+    chip.onclick = () => select(lid(l));
+    c.appendChild(chip);
+  });
+}
+
+function select(id) {
+  S.selId = id;
+  const layer = S.doc.layers.find(l => lid(l) === id);
+  const node = S.nodes.get(id);
+  if (S.tr) S.tr.nodes(node && layer && (layer.type === 'image' || layer.type === 'search_box') ? [node] : []);
+  renderChips(); renderProps();
+}
+
+function row(html) { const d = document.createElement('div'); d.className = 'row'; d.innerHTML = html; return d; }
+
+function colorRow(labelText, value, onPick) {
+  const d = row(`<label>${labelText}</label>`);
+  SWATCHES.forEach(c => {
+    const s = document.createElement('span');
+    s.className = 'sw' + (value && value.toUpperCase() === c ? ' sel' : '');
+    s.style.background = c;
+    s.onclick = () => onPick(c);
+    d.appendChild(s);
+  });
+  const picker = document.createElement('input'); picker.type = 'color'; picker.value = value || '#FFFFFF';
+  picker.oninput = () => onPick(picker.value.toUpperCase());
+  d.appendChild(picker);
+  const hex = document.createElement('input'); hex.type = 'text'; hex.className = 'hex'; hex.value = value || '';
+  hex.placeholder = '#RRGGBB 或 rgb(...)';
+  hex.onchange = () => {
+    let v = hex.value.trim();
+    const m = v.match(/rgba?\((\d+)[,\s]+(\d+)[,\s]+(\d+)/i);
+    if (m) v = '#' + [m[1], m[2], m[3]].map(n => (+n).toString(16).padStart(2, '0')).join('');
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) onPick(v.toUpperCase()); else toast('颜色格式不正确');
+  };
+  d.appendChild(hex);
+  return d;
+}
+
+function sliderRow(labelText, min, max, step, value, fmt, onChange) {
+  const d = row(`<label>${labelText}</label>`);
+  const r = document.createElement('input');
+  r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = value;
+  const v = document.createElement('span'); v.className = 'val'; v.textContent = fmt(value);
+  r.oninput = () => { v.textContent = fmt(+r.value); onChange(+r.value); };
+  d.appendChild(r); d.appendChild(v);
+  return d;
+}
+
+function refreshTextNode(layer) {
+  const node = S.nodes.get(lid(layer));
+  if (!node) return;
+  const W = S.stage.width(), H = S.stage.height();
+  const cx = layer.x ?? 0.5, cy = layer.y ?? 0.7;
+  node.text(textOf(layer));
+  node.fontSize(Math.max(10, W * (layer.size ?? 0.06)));
+  applyTextStyle(node, layer);
+  node.x(W * cx - node.width() / 2);
+  node.y(H * cy - node.height() / 2);
+  S.layerK.batchDraw();
+}
+
+function renderProps() {
+  const p = $('props'); p.innerHTML = '';
+  const layer = S.doc.layers.find(l => lid(l) === S.selId);
+  if (!layer) { p.innerHTML = '<span class="muted">点击画布或图层条选择一个图层</span>'; return; }
+  const title = row(`<label style="min-width:0;font-weight:600;color:var(--text)">${layerName(layer)}</label>`);
+  if (!['search_box', 'guide_subtitle'].includes(layer.type) && layer.text_source !== '角色名') {
+    const del = document.createElement('button'); del.textContent = '删除图层'; del.style.marginLeft = 'auto';
+    del.onclick = () => {
+      S.doc.layers = S.doc.layers.filter(l => l !== layer);
+      const n = S.nodes.get(lid(layer)); if (n) n.destroy();
+      S.nodes.delete(lid(layer)); select(''); renderChips();
+    };
+    title.appendChild(del);
+  }
+  p.appendChild(title);
+
+  if (layer.type === 'search_box') {
+    if (!S.searchBoxUrl) p.appendChild(row('<span class="muted">该记录没有搜索框图片（表格「搜索框图片」列上传后生效）</span>'));
+    p.appendChild(sliderRow('大小', 0.2, 1.0, 0.01, layer.scale ?? 0.7, v => Math.round(v * 100) + '%', v => {
+      layer.scale = v; const n = S.nodes.get(lid(layer));
+      if (n) { const W = S.stage.width(); const ratio = n.height() / n.width(); const cx = n.x() + n.width() * n.scaleX() / 2;
+        n.scaleX(1); n.scaleY(1); n.width(W * v); n.height(W * v * ratio); n.x(cx - n.width() / 2); S.layerK.batchDraw(); }
+    }));
+    p.appendChild(row('<span class="muted">位置直接在画布拖拽，角点缩放</span>'));
+    return;
+  }
+
+  if (layer.type === 'image') {
+    p.appendChild(sliderRow('大小', 0.05, 1.0, 0.01, layer.scale ?? 0.2, v => Math.round(v * 100) + '%', v => {
+      layer.scale = v; const n = S.nodes.get(lid(layer));
+      if (n) { const W = S.stage.width(); const ratio = n.height() / n.width();
+        const cx = n.x() + n.width() * n.scaleX() / 2, cyp = n.y() + n.height() * n.scaleY() / 2;
+        n.scaleX(1); n.scaleY(1); n.width(W * v); n.height(W * v * ratio);
+        n.x(cx - n.width() / 2); n.y(cyp - n.height() / 2); S.layerK.batchDraw(); }
+    }));
+    const animSel = row('<label>动画</label>');
+    const sel = document.createElement('select');
+    [['', '无'], ['shake', '抖动'], ['float', '上下浮动'], ['blink', '闪烁']].forEach(([v, t]) => {
+      const o = document.createElement('option'); o.value = v; o.textContent = t;
+      if ((layer.animation?.type || '') === v) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = () => { layer.animation = sel.value ? { type: sel.value } : null; renderProps(); };
+    animSel.appendChild(sel); p.appendChild(animSel);
+    if (layer.animation?.type === 'shake' || layer.animation?.type === 'float') {
+      const isShake = layer.animation.type === 'shake';
+      p.appendChild(sliderRow('幅度', 0.004, 0.06, 0.002, layer.animation.amplitude ?? (isShake ? 0.012 : 0.018),
+        v => (v * 100).toFixed(1) + '%', v => layer.animation.amplitude = v));
+      p.appendChild(sliderRow('速度', isShake ? 2 : 0.3, isShake ? 16 : 3, isShake ? 0.5 : 0.1,
+        layer.animation.speed ?? (isShake ? 8 : 0.8), v => v + 'Hz', v => layer.animation.speed = v));
+    }
+    p.appendChild(timingRow(layer));
+    return;
+  }
+
+  /* 文字类图层 */
+  if (layer.type === 'guide_subtitle') {
+    const d = row('<label>文案</label>');
+    const sel = document.createElement('select'); sel.style.flex = '1';
+    const opts = [['', '（留空 = 随机文案池）'], ...S.guideOptions.map(o => [o, o]), ['__custom__', '自定义输入…']];
+    opts.forEach(([v, t]) => {
+      const o = document.createElement('option'); o.value = v; o.textContent = t;
+      sel.appendChild(o);
+    });
+    sel.value = S.guideOptions.includes(S.guideText) ? S.guideText : (S.guideText ? '__custom__' : '');
+    const custom = document.createElement('input'); custom.type = 'text'; custom.style.flex = '1';
+    custom.value = S.guideText; custom.placeholder = '输入自定义引导语';
+    custom.style.display = sel.value === '__custom__' ? '' : 'none';
+    sel.onchange = () => {
+      if (sel.value === '__custom__') { custom.style.display = ''; }
+      else { custom.style.display = 'none'; S.guideText = sel.value; refreshTextNode(layer); }
+    };
+    custom.onchange = () => { S.guideText = custom.value.trim(); refreshTextNode(layer); };
+    d.appendChild(sel); p.appendChild(d);
+    const d2 = row(''); d2.appendChild(custom); p.appendChild(d2);
+    p.appendChild(row('<span class="muted">成片中引导语按配音节奏分段显示，画布展示整句效果</span>'));
+  } else {
+    const d = row('<label>文案</label>');
+    const sel = document.createElement('select');
+    [['角色名', '读取「角色名」列'], ['自定义', '自定义输入']].forEach(([v, t]) => {
+      const o = document.createElement('option'); o.value = v; o.textContent = t;
+      if ((layer.text_source || '自定义') === v) o.selected = true;
+      sel.appendChild(o);
+    });
+    const inp = document.createElement('input'); inp.type = 'text'; inp.style.flex = '1';
+    inp.value = layer.text || ''; inp.placeholder = '输入文字';
+    inp.style.display = (layer.text_source === '角色名') ? 'none' : '';
+    sel.onchange = () => {
+      layer.text_source = sel.value === '角色名' ? '角色名' : '自定义';
+      inp.style.display = sel.value === '角色名' ? 'none' : '';
+      refreshTextNode(layer);
+    };
+    inp.oninput = () => { layer.text = inp.value; refreshTextNode(layer); };
+    d.appendChild(sel); d.appendChild(inp); p.appendChild(d);
+  }
+
+  p.appendChild(sliderRow('字号', 0.02, 0.12, 0.002, layer.size ?? 0.06,
+    v => (v * 100).toFixed(1) + '%', v => { layer.size = v; refreshTextNode(layer); }));
+  p.appendChild(colorRow('字色', layer.color || '#FFFFFF', c => { layer.color = c; refreshTextNode(layer); renderProps(); }));
+
+  const sc = document.createElement('div'); sc.className = 'subcard';
+  sc.innerHTML = '<span class="tt">描边</span>';
+  sc.appendChild(colorRow('颜色', layer.stroke?.color || '#000000', c => {
+    layer.stroke = { color: c, width: layer.stroke?.width ?? 3 }; refreshTextNode(layer); renderProps();
+  }));
+  sc.appendChild(sliderRow('粗细', 0, 8, 1, layer.stroke?.width ?? 0, v => v + 'px', v => {
+    layer.stroke = v ? { color: layer.stroke?.color || '#000000', width: v } : null; refreshTextNode(layer);
+  }));
+  p.appendChild(sc);
+
+  const sh = document.createElement('div'); sh.className = 'subcard';
+  sh.innerHTML = '<span class="tt">阴影</span>';
+  const shadow = layer.shadow || null;
+  sh.appendChild(colorRow('颜色', shadow?.color || '#000000', c => {
+    layer.shadow = { color: c, opacity: shadow?.opacity ?? 0.6, blur: shadow?.blur ?? 4 };
+    refreshTextNode(layer); renderProps();
+  }));
+  sh.appendChild(sliderRow('不透明度', 0, 1, 0.05, shadow?.opacity ?? 0, v => Math.round(v * 100) + '%', v => {
+    layer.shadow = v ? { color: layer.shadow?.color || '#000000', opacity: v, blur: layer.shadow?.blur ?? 4 } : null;
+    refreshTextNode(layer);
+  }));
+  sh.appendChild(sliderRow('模糊度', 0, 20, 1, shadow?.blur ?? 0, v => v + 'px', v => {
+    if (layer.shadow) { layer.shadow.blur = v; refreshTextNode(layer); }
+  }));
+  p.appendChild(sh);
+
+  if (layer.type !== 'guide_subtitle') p.appendChild(timingRow(layer));
+}
+
+function timingRow(layer) {
+  const d = row('<label>显示时机</label>');
+  const sel = document.createElement('select');
+  [['full', '全程显示'], ['0', '跟随引导语第1段'], ['1', '第2段'], ['2', '第3段'], ['3', '第4段']].forEach(([v, t]) => {
+    const o = document.createElement('option'); o.value = v; o.textContent = t;
+    const cur = (layer.timing && typeof layer.timing === 'object') ? String(layer.timing.segment) : 'full';
+    if (cur === v) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.onchange = () => layer.timing = sel.value === 'full' ? 'full' : { segment: +sel.value };
+  d.appendChild(sel);
+  return d;
+}
+
+/* ---------- 新增图层 ---------- */
+$('btnAddText').onclick = () => {
+  if (!S.doc) return;
+  const layer = { type: 'text', text_source: '自定义', text: '新字幕', visible: true,
+    x: 0.5, y: 0.5, size: 0.05, color: '#FFFFFF', stroke: { color: '#000000', width: 2 }, shadow: null, timing: 'full' };
+  S.doc.layers.push(layer);
+  addNode(layer).then(() => { renderChips(); select(lid(layer)); });
+};
+$('btnAddImage').onclick = async () => {
+  if (!S.doc) return;
+  openModal('<span class="tt">选择素材或上传新图片</span><div class="assets" id="assetGrid">加载中…</div><div class="row"><button id="btnNewAsset" class="primary">上传新图片</button><button id="btnCloseModal">关闭</button></div>');
+  $('btnCloseModal').onclick = closeModal;
+  $('btnNewAsset').onclick = () => $('fileImage').click();
+  try {
+    const data = await api('/api/v1/h5/assets', null, 'GET');
+    const g = $('assetGrid'); g.innerHTML = data.assets.length ? '' : '<span class="muted">素材库为空，点上传</span>';
+    data.assets.forEach(a => {
+      const d = document.createElement('div'); d.className = 'a';
+      d.innerHTML = `<img src="${a.url}"><div>${a.name}</div>`;
+      d.onclick = () => { closeModal(); addImageLayer(a.url); };
+      g.appendChild(d);
+    });
+  } catch (e) { $('assetGrid').innerHTML = '加载失败：' + e.message; }
+};
+$('fileImage').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  toast('上传素材中…');
+  try {
+    const asset = await api(`/api/v1/h5/assets/upload?filename=${encodeURIComponent(f.name)}`, f);
+    closeModal(); addImageLayer(asset.url); toast('已添加到画布和素材库');
+  } catch (err) { toast('上传失败：' + err.message); }
+};
+function addImageLayer(url) {
+  const layer = { type: 'image', url, visible: true, x: 0.5, y: 0.4, scale: 0.25, animation: null, timing: 'full' };
+  S.doc.layers.push(layer);
+  addNode(layer).then(() => { renderChips(); select(lid(layer)); });
+}
+
+/* ---------- 弹层 ---------- */
+function openModal(html) { $('modal').innerHTML = html; $('modal-bg').style.display = 'flex'; }
+function closeModal() { $('modal-bg').style.display = 'none'; }
+$('modal-bg').addEventListener('click', e => { if (e.target.id === 'modal-bg') closeModal(); });
+
+/* ---------- 保存 / 预览 / 处理 ---------- */
+function cleanDoc() {
+  return { version: S.doc.version || 1, layers: S.doc.layers.map(l => { const c = { ...l }; delete c._lid; return c; }) };
+}
+async function save(asDefault) {
+  try {
+    await api('/api/v1/h5/params/save', {
+      record_id: S.recordId, layer_doc: cleanDoc(), guide_text: S.guideText, set_as_default: !!asDefault,
+    });
+    toast(asDefault ? '已保存并设为全局默认' : '样式已保存');
+  } catch (e) { toast('保存失败：' + e.message); }
+}
+$('btnSave').onclick = () => save(false);
+$('btnDefault').onclick = () => save(true);
+$('btnRender').onclick = async () => {
+  toast('服务端渲染中…');
+  try {
+    const sampleGuide = S.guideText || S.guideOptions[0] || '';
+    const r = await api('/api/v1/h5/render', {
+      record_id: S.recordId, frame_url: S.frame.frame_url, layer_doc: cleanDoc(),
+      context: S.ctx, guide_text: sampleGuide, search_box_url: S.searchBoxUrl,
+    });
+    const note = S.guideText ? '' : '<span class="muted">引导语留空（成片随机抽取），预览以文案池第1条示意</span>';
+    openModal(`<span class="tt">精确预览（与成片同渲染器；动画以成片为准）</span>${note}<img class="pv" src="${r.preview_url}"><div class="row"><button id="btnCloseModal">关闭</button></div>`);
+    $('btnCloseModal').onclick = closeModal;
+  } catch (e) { toast('预览失败：' + e.message); }
+};
+$('btnProcess').onclick = async () => {
+  try {
+    await save(false);
+    await api('/api/v1/h5/process', { record_id: S.recordId });
+    $('status').textContent = '已提交，处理中…（视频处理约需2-5分钟）';
+    startPoll();
+    toast('已提交处理');
+  } catch (e) { toast('提交失败：' + e.message); }
+};
+function startPoll() {
+  stopPoll();
+  S.polling = setInterval(async () => {
+    try {
+      const r = await api('/api/v1/h5/record-status', { record_id: S.recordId });
+      if (r.status === '成功') {
+        stopPoll();
+        $('status').innerHTML = `✅ 处理完成：<a href="${r.output_video_url}" target="_blank">查看成片</a>`;
+      } else if (r.status === '失败') {
+        stopPoll();
+        $('status').textContent = '❌ 处理失败：' + (r.error || '').slice(0, 160);
+      } else {
+        $('status').textContent = `处理中…（状态：${r.status || '排队'}）`;
+      }
+    } catch (e) {}
+  }, 5000);
+}
+function stopPoll() { if (S.polling) { clearInterval(S.polling); S.polling = null; } }
+
+/* ---------- 启动 ---------- */
+window.addEventListener('resize', () => { if (S.recordId && S.frame) buildStage(); });
+const rid = new URLSearchParams(location.search).get('record_id');
+if (rid) openEditor(rid); else showHome();
+</script>
+</body>
+</html>

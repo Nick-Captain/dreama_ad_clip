@@ -236,6 +236,8 @@ def _vision_detect_subtitle(image_url: str) -> dict:
         payload = {
             "model": "doubao-seed-2-0-lite-260215",
             "temperature": 0,
+            "stream": False,
+            "thinking": {"type": "disabled"},  # 检测只需答有/无，关掉深度思考提速
             "messages": [{
                 "role": "user",
                 "content": [
@@ -245,17 +247,44 @@ def _vision_detect_subtitle(image_url: str) -> dict:
             }],
         }
         resp = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=60)
+        resp.encoding = "utf-8"
         diag["status"] = resp.status_code
         diag["content_type"] = resp.headers.get("Content-Type", "")
         diag["body_head"] = resp.text[:300]
-        if resp.status_code != 200 or "json" not in diag["content_type"].lower():
-            diag["error"] = "网关返回非JSON响应"
+        if resp.status_code != 200:
+            diag["error"] = f"网关返回 HTTP {resp.status_code}"
             return diag
-        data = resp.json()
-        answer = str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+
+        content_type = diag["content_type"].lower()
+        if "event-stream" in content_type:
+            # 扣子模型网关即使收到非流式请求也固定返回 SSE 流，逐行拼接增量内容
+            answer_parts = []
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[len("data:"):].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                answer_parts.append(delta.get("content") or "")
+            answer = "".join(answer_parts).strip()
+        elif "json" in content_type:
+            data = resp.json()
+            answer = str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+        else:
+            diag["error"] = f"网关返回无法识别的 Content-Type: {diag['content_type']}"
+            return diag
+
         diag["answer"] = answer
         diag["has_subtitle"] = "有" in answer and "无" not in answer
-        diag["ok"] = True
+        diag["ok"] = bool(answer)
+        if not answer:
+            diag["error"] = "网关响应中未解析到回答内容"
         return diag
     except Exception as e:
         diag["error"] = str(e)

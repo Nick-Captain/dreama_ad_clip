@@ -314,10 +314,11 @@ def _count_field_usage(client: "BitableClient", app_token: str, table_id: str, f
 def migrate_bitable_schema(app_token: str, table_id: str) -> dict:
     """
     将已有表格的结构对齐到当前 TEMPLATE_FIELDS：
-    1. 默认主列「文本」更名复用为「素材URL」（主列不可删除，只能改名）
+    1. 索引列改造为「创作日期」（日期类型；索引列不可删除只能改造，
+       历史上曾是默认「文本」、后为「素材URL」）
     2. 合并附件列：只保留「视频附件」（空列删除、有数据的列改名，不丢数据）
     3. 删除历史遗留的冗余列（仅删 LEGACY_FIELDS_TO_DELETE 中点名的）
-    4. 对齐字段类型/下拉选项，补齐缺失列
+    4. 对齐字段类型/下拉选项，补齐缺失列；模板外的用户自建列一律不碰
 
     幂等：重复执行无副作用。
     """
@@ -327,17 +328,23 @@ def migrate_bitable_schema(app_token: str, table_id: str) -> dict:
     fields_resp = client.list_fields(app_token=app_token, table_id=table_id)
     existing = {f["field_name"]: f for f in fields_resp.get("data", {}).get("items", [])}
 
-    # 1. 主列「文本」改造为「素材URL」
-    if "文本" in existing and "素材URL" not in existing:
+    # 1. 索引列改造为「创作日期」（素材URL 功能由普通列承接，缺失时步骤4自动补建）
+    primary = next((f for f in existing.values() if f.get("is_primary")), None)
+    if primary and primary["field_name"] != "创作日期":
+        old_name = primary["field_name"]
         try:
             client.update_field(
-                app_token, table_id, existing["文本"]["field_id"],
-                {"field_name": "素材URL", "type": 1},
+                app_token, table_id, primary["field_id"],
+                {
+                    "field_name": "创作日期",
+                    "type": 5,  # 日期
+                    "property": {"date_formatter": "yyyy/MM/dd"},
+                },
             )
-            existing["素材URL"] = existing.pop("文本")
-            actions.append("主列「文本」更名为「素材URL」")
+            existing["创作日期"] = existing.pop(old_name)
+            actions.append(f"索引列「{old_name}」改造为「创作日期」（日期类型）")
         except Exception as e:
-            actions.append(f"更名「文本」失败: {e}")
+            actions.append(f"改造索引列失败: {e}")
 
     # 2. 合并附件列：只保留「视频附件」
     if "附件" in existing:

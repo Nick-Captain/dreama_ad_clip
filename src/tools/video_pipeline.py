@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import tempfile
+import threading
 import uuid
 import re
 import subprocess
@@ -49,6 +50,11 @@ from coze_coding_utils.runtime_ctx.context import new_context, Context, default_
 from coze_coding_utils.log.write_log import request_context
 
 logger = logging.getLogger(__name__)
+
+# 本地重型转码的并发闸门：沙箱 CPU 有限，批量并发时多个 libx264 编码
+# 互相拖慢会直接撞超时（实测两条并发即触发 120s 超时被杀）。
+# 只限制本地编码，云端调用（TTS/拼接/生图）不占名额。
+_HEAVY_FFMPEG_SEMAPHORE = threading.Semaphore(2)
 
 # ============================================================
 # 内置广告尾帧库（已上传到对象存储的预签名URL）
@@ -623,7 +629,7 @@ def _generate_still_video_with_subtitles_and_audio(
         "-i", merged_audio_path,
         "-vf", vf_chain,
         "-c:v", "libx264",
-        "-preset", "fast",
+        "-preset", "veryfast",  # 静帧+字幕内容，对画质影响可忽略，显著降低CPU耗时
         "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-t", str(total_duration),
@@ -634,7 +640,11 @@ def _generate_still_video_with_subtitles_and_audio(
     ]
 
     logger.info(f"[{uid}] 执行 ffmpeg 命令...")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    try:
+        with _HEAVY_FFMPEG_SEMAPHORE:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg 生成定格视频超时（600秒），可能是并发过高或沙箱资源不足，请稍后重试")
 
     if result.returncode != 0:
         stderr_tail = result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
@@ -718,7 +728,10 @@ def _mix_bgm(
         "-t", str(video_duration),
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("BGM 混音超时（300秒），请稍后重试")
 
     # 清理
     try:

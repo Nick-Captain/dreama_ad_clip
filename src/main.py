@@ -670,6 +670,55 @@ async def api_migrate_bitable(request: Request):
     return await asyncio.to_thread(migrate_bitable_schema, app_token, table_id)
 
 
+@app.post("/api/v1/debug-table")
+async def api_debug_table(request: Request):
+    """临时诊断：返回表格记录的原始字段值（排查转场链路，定位后移除）"""
+    ctx = new_context(method="api_debug_table", headers=request.headers)
+    request_context.set(ctx)
+    payload = await request.json()
+
+    def _read():
+        from tools.bitable_tool import BitableClient
+        client = BitableClient()
+        resp = client.search_records(
+            app_token=payload.get("app_token", ""),
+            table_id=payload.get("table_id", ""),
+        )
+        items = resp.get("data", {}).get("items", [])
+        return {
+            "count": len(items),
+            "records": [
+                {
+                    "record_id": item.get("record_id"),
+                    "fields": item.get("fields", {}),
+                }
+                for item in items
+            ],
+        }
+
+    return await asyncio.to_thread(_read)
+
+
+@app.post("/api/v1/debug-concat")
+async def api_debug_concat(request: Request):
+    """临时诊断：直接调用云端视频拼接，验证 transitions 参数行为（定位后移除）"""
+    ctx = new_context(method="api_debug_concat", headers=request.headers)
+    request_context.set(ctx)
+    payload = await request.json()
+    videos = payload.get("videos") or []
+    transitions = payload.get("transitions") or None
+    if len(videos) < 2:
+        raise HTTPException(status_code=400, detail="至少提供2个视频URL")
+
+    def _concat():
+        from coze_coding_dev_sdk.video_edit import VideoEditClient
+        client = VideoEditClient(ctx=request_context.get())
+        resp = client.concat_videos(videos=videos, transitions=transitions)
+        return {"url": resp.url, "videos_count": len(videos), "transitions": transitions}
+
+    return await asyncio.to_thread(_concat)
+
+
 @app.get("/api/v1/options")
 async def api_list_options():
     """列出所有可用选项"""

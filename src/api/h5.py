@@ -421,6 +421,89 @@ async def api_upload_video(request: Request, filename: str = "video.mp4"):
 
 
 # ------------------------------------------------------------
+# 大文件分片上传（扣子网关对请求体限长：9MB可过、46MB被拒，
+# 浏览器按 6MB 分片依次上传，后端顺序拼装后转存对象存储）
+# ------------------------------------------------------------
+
+MAX_UPLOAD_TOTAL = 500 * 1024 * 1024
+
+
+def _part_path(upload_id: str) -> str:
+    safe = "".join(c for c in upload_id if c.isalnum())[:32]
+    if not safe:
+        raise HTTPException(status_code=400, detail="非法 upload_id")
+    return os.path.join(tempfile.gettempdir(), f"h5up_{safe}.part")
+
+
+@router.post("/upload-video/init")
+async def api_upload_init():
+    upload_id = uuid.uuid4().hex[:16]
+    open(_part_path(upload_id), "wb").close()
+    return {"upload_id": upload_id, "chunk_size": 6 * 1024 * 1024}
+
+
+@router.post("/upload-video/chunk")
+async def api_upload_chunk(request: Request, upload_id: str, index: int = 0):
+    path = _part_path(upload_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=400, detail="upload_id 不存在或已过期，请重新 init")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="空分片")
+    if os.path.getsize(path) + len(body) > MAX_UPLOAD_TOTAL:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail="文件超过500MB上限")
+
+    def _append():
+        with open(path, "ab") as f:
+            f.write(body)
+        return os.path.getsize(path)
+
+    size = await asyncio.to_thread(_append)
+    return {"received": len(body), "total": size, "index": index}
+
+
+@router.post("/upload-video/finish")
+async def api_upload_finish(request: Request):
+    payload = await _json_body(request)
+    upload_id = payload.get("upload_id", "")
+    filename = payload.get("filename", "video.mp4")
+    ext = os.path.splitext(filename)[1].lower() or ".mp4"
+    if ext not in VIDEO_EXTS:
+        raise HTTPException(status_code=400, detail=f"仅支持视频格式: {VIDEO_EXTS}")
+    path = _part_path(upload_id)
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        raise HTTPException(status_code=400, detail="分片数据不存在或为空")
+
+    def _run():
+        from tools.video_pipeline import _get_storage
+        from tools.bitable_tool import BitableClient
+        storage = _get_storage()
+        try:
+            with open(path, "rb") as f:
+                key = storage.stream_upload_file(
+                    fileobj=f,
+                    file_name=f"h5/videos/{uuid.uuid4().hex[:10]}{ext}",
+                    content_type="video/mp4",
+                )
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        url = storage.generate_presigned_url(key=key, expire_time=2592000)
+        client = BitableClient()
+        resp = client.create_record(DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID, {"视频URL": url})
+        record_id = resp.get("data", {}).get("record", {}).get("record_id", "")
+        return {"success": True, "record_id": record_id, "video_url": url, "name": filename}
+
+    return await asyncio.to_thread(_run)
+
+
+# ------------------------------------------------------------
 # 记录列表与单条处理
 # ------------------------------------------------------------
 

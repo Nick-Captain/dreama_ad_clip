@@ -670,24 +670,6 @@ async def api_migrate_bitable(request: Request):
     return await asyncio.to_thread(migrate_bitable_schema, app_token, table_id)
 
 
-@app.post("/api/v1/debug-vision")
-async def api_debug_vision(request: Request):
-    """临时诊断端点：直连多模态网关做字幕检测，返回网关原始响应信息。
-    用于排查去字幕链路（网关返回非JSON导致检测降级），定位后移除。"""
-    ctx = new_context(method="api_debug_vision", headers=request.headers)
-    request_context.set(ctx)
-    try:
-        payload = await request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
-    image_url = payload.get("image_url", "")
-    if not image_url:
-        raise HTTPException(status_code=400, detail="image_url 必填")
-
-    from tools.video_pipeline import _vision_detect_subtitle
-    return await asyncio.to_thread(_vision_detect_subtitle, image_url)
-
-
 @app.get("/api/v1/options")
 async def api_list_options():
     """列出所有可用选项"""

@@ -862,19 +862,27 @@ def process_video_pipeline(
         if not tail_url:
             raise ValueError(f"未找到内置尾帧「{tail_name}」，可选：{list(BUILTIN_TAILS.keys())}")
 
-    transitions = []
     t1_id = TRANSITION_OPTIONS.get(transition1_name)
     t2_id = TRANSITION_OPTIONS.get(transition2_name)
-    if t1_id:
-        transitions.append(t1_id)
-    if t2_id:
-        transitions.append(t2_id)
 
     video_edit_client = VideoEditClient(ctx=ctx)
-    concat_resp = video_edit_client.concat_videos(
-        videos=[video_url, freeze_video_url, tail_url],
-        transitions=transitions if transitions else None,
-    )
+    # transitions 是位置参数：第0个作用于视频1→2，第1个作用于视频2→3。
+    # 只选其中一处转场时不能传单元素列表（会错位/扩散到别的衔接处），
+    # 改为分两次拼接，确保转场只落在用户选择的位置。
+    if bool(t1_id) == bool(t2_id):
+        concat_resp = video_edit_client.concat_videos(
+            videos=[video_url, freeze_video_url, tail_url],
+            transitions=[t1_id, t2_id] if t1_id else None,
+        )
+    else:
+        first_resp = video_edit_client.concat_videos(
+            videos=[video_url, freeze_video_url],
+            transitions=[t1_id] if t1_id else None,
+        )
+        concat_resp = video_edit_client.concat_videos(
+            videos=[first_resp.url, tail_url],
+            transitions=[t2_id] if t2_id else None,
+        )
     final_video_url = concat_resp.url
     logger.info(f"[{uid}] 拼接后视频URL: {final_video_url}")
 
@@ -1083,19 +1091,25 @@ def process_ad_tail_video(
                     "error": f"未找到内置尾帧「{tail_name}」，可选：{list(BUILTIN_TAILS.keys())}"
                 }, ensure_ascii=False)
 
-        transitions = []
         t1_id = TRANSITION_OPTIONS.get(transition1_name)
         t2_id = TRANSITION_OPTIONS.get(transition2_name)
-        if t1_id:
-            transitions.append(t1_id)
-        if t2_id:
-            transitions.append(t2_id)
 
         video_edit_client = VideoEditClient(ctx=ctx)
-        concat_resp = video_edit_client.concat_videos(
-            videos=[video_url, freeze_video_url, tail_url],
-            transitions=transitions if transitions else None,
-        )
+        # transitions 是位置参数：只选一处转场时分两次拼接，确保转场落位正确
+        if bool(t1_id) == bool(t2_id):
+            concat_resp = video_edit_client.concat_videos(
+                videos=[video_url, freeze_video_url, tail_url],
+                transitions=[t1_id, t2_id] if t1_id else None,
+            )
+        else:
+            first_resp = video_edit_client.concat_videos(
+                videos=[video_url, freeze_video_url],
+                transitions=[t1_id] if t1_id else None,
+            )
+            concat_resp = video_edit_client.concat_videos(
+                videos=[first_resp.url, tail_url],
+                transitions=[t2_id] if t2_id else None,
+            )
         final_video_url = concat_resp.url
         logger.info(f"[{uid}] 拼接后视频URL: {final_video_url}")
 

@@ -154,6 +154,14 @@ TEMPLATE_FIELDS = [
         },
     },
     {
+        "field_name": "样式参数",
+        "type": 1,  # 文本：H5 编辑器托管的图层 JSON，用户不手填
+    },
+    {
+        "field_name": "调整链接",
+        "type": 15,  # 超链接：该记录专属的 H5 编辑器入口
+    },
+    {
         "field_name": "处理状态",
         "type": 3,  # 单选
         "property": {

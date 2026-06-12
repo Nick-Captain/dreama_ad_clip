@@ -270,6 +270,11 @@ async def lifespan(app: FastAPI):
     def _set_utc(dbapi_conn, _):
         with dbapi_conn.cursor() as cur:
             cur.execute("SET TIME ZONE 'UTC'")
+    try:
+        # H5 编辑器的全局默认/素材库表，幂等建表
+        Base.metadata.create_all(engine)
+    except Exception as e:
+        logger.warning(f"H5 数据表初始化失败（不影响主流程）: {e}")
     checkpointer = get_memory_saver()
     if graph_helper.is_agent_proj():
         base = graph_helper.get_agent_instance("agents.agent", None)

@@ -171,6 +171,11 @@ def batch_process_from_bitable(
         # 处理管线是阻塞同步调用，必须用线程池才能真正并发；
         # 之前的 asyncio.run 方案在 FastAPI/飞书回调（已有事件循环）中会直接抛 RuntimeError。
         from tools.bitable_tool import field_to_text, attachment_to_download_url, GUIDE_TEXT_OPTIONS
+        from tools.layer_model import resolve_layer_doc
+        from tools.h5_store import get_global_layer_doc
+
+        # 全局默认样式整批只读一次（DB 故障时降级为内置默认）
+        global_layer_doc = get_global_layer_doc()
 
         def process_one(item: dict) -> dict:
                 record_id = item.get("record_id")
@@ -275,6 +280,13 @@ def batch_process_from_bitable(
                     except (TypeError, ValueError):
                         _bgm_volume = 0.6
 
+                    # 图层样式：记录级「样式参数」> 全局默认 > 内置默认
+                    _layer_doc = resolve_layer_doc(
+                        field_to_text(fields.get("样式参数")),
+                        global_layer_doc,
+                    )
+                    _layer_ctx = {"角色名": field_to_text(fields.get("角色名")).strip()}
+
                     result = process_video_pipeline(
                         video_url=video_url,
                         guide_text=_guide_text,
@@ -287,6 +299,8 @@ def batch_process_from_bitable(
                         search_box_image_url=_search_box_url,
                         bgm_url=_bgm_url,
                         bgm_volume=_bgm_volume,
+                        style_layers=_layer_doc,
+                        layer_context=_layer_ctx,
                     )
                     # process_video_pipeline 返回 dict，直接使用
                     result_data = result

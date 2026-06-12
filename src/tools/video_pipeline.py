@@ -482,38 +482,6 @@ def _split_subtitle(text: str) -> List[str]:
     return segments if segments else [cleaned]
 
 
-def _composite_search_box(
-    frame_image_path: str,
-    search_box_image_url: Optional[str],
-    output_path: str,
-) -> str:
-    """
-    将搜索框图片合成到定格帧上
-    - 搜索框居中偏上，占画面宽度70%
-    """
-    frame_img = Image.open(frame_image_path).convert("RGBA")
-
-    if search_box_image_url:
-        resp = requests.get(search_box_image_url, timeout=60)
-        resp.raise_for_status()
-        search_box = Image.open(BytesIO(resp.content)).convert("RGBA")
-
-        frame_w, frame_h = frame_img.size
-        target_w = int(frame_w * 0.7)
-        ratio = target_w / search_box.width
-        target_h = int(search_box.height * ratio)
-        search_box = search_box.resize((target_w, target_h), Image.Resampling.LANCZOS)
-
-        pos_x = (frame_w - target_w) // 2
-        pos_y = int(frame_h * 0.15)
-
-        frame_img.paste(search_box, (pos_x, pos_y), search_box)
-
-    frame_img = frame_img.convert("RGB")
-    frame_img.save(output_path, "PNG")
-    return output_path
-
-
 def _get_audio_duration(audio_url: str) -> float:
     """获取音频时长（秒），通过下载后用 ffprobe 获取"""
     tmp_audio = os.path.join(tempfile.gettempdir(), f"tmp_audio_{uuid.uuid4().hex[:8]}.mp3")
@@ -561,75 +529,46 @@ def _find_chinese_font() -> str:
     return ""
 
 
-def _generate_still_video_with_subtitles_and_audio(
-    composite_image_path: str,
-    subtitle_segments: List[str],
-    segment_durations: List[float],
+def _generate_freeze_video_from_plan(
+    plan,
     merged_audio_path: str,
-    video_width: int,
-    video_height: int,
+    total_duration: float,
     output_path: str,
     uid: str,
 ) -> str:
     """
-    用 ffmpeg 本地完成：
-    1. 从合成图生成静止视频
-    2. 按实际 TTS 朗读节奏烧录分段字幕
-    3. 合成配音
+    按图层渲染计划生成定格视频：
+    - 输入0 = 拍平底图（静态全程图层已包含其中）
+    - 输入1 = 完整配音
+    - 输入2.. = 动态 overlay（分段字幕 enable / 动画 x,y 时间表达式）
 
-    segment_durations: 每段字幕的实际 TTS 朗读时长（秒）
-    merged_audio_path: 已拼接好的完整配音文件路径
-
+    plan: tools.layer_render.FreezeRenderPlan
     返回输出视频路径
     """
-    font_path = _find_chinese_font()
-    if not font_path:
-        logger.warning(f"[{uid}] 未找到中文字体，字幕可能无法正确显示")
-        font_path = ""
-
-    # 计算每段字幕的起止时间（累计时长）
-    drawtext_filters = []
-    cumulative = 0.0
-    for i, (seg, dur) in enumerate(zip(subtitle_segments, segment_durations)):
-        start_t = cumulative
-        end_t = cumulative + dur
-        cumulative = end_t
-
-        if font_path:
-            font_param = f"fontfile='{font_path}':"
-        else:
-            font_param = ""
-
-        font_size = max(24, int(video_width * 0.06))
-
-        # 字幕在画面中间偏下（y=70%位置）
-        filter_str = (
-            f"drawtext={font_param}"
-            f"text='{seg}':"
-            f"fontsize={font_size}:"
-            f"fontcolor=white:"
-            f"bordercolor=black:"
-            f"borderw=3:"
-            f"x=(w-text_w)/2:"
-            f"y=h*0.70-text_h/2:"
-            f"enable='between(t,{start_t},{end_t})'"
-        )
-        drawtext_filters.append(filter_str)
-
-    vf_chain = ",".join(drawtext_filters)
-    total_duration = cumulative
-
-    logger.info(f"[{uid}] ffmpeg 字幕: {len(subtitle_segments)} 段, 总时长 {total_duration:.2f}s")
-
     cmd = [
-        "ffmpeg",
-        "-y",
-        "-loop", "1",
-        "-i", composite_image_path,
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", plan.base_path,
         "-i", merged_audio_path,
-        "-vf", vf_chain,
+    ]
+    for spec in plan.overlays:
+        cmd += ["-loop", "1", "-i", spec.path]
+
+    filter_parts = ["[0:v]fps=30[base0]"]
+    last_label = "[base0]"
+    for idx, spec in enumerate(plan.overlays):
+        opts = f"x={spec.x_expr}:y={spec.y_expr}"
+        if spec.enable_expr:
+            opts += f":enable='{spec.enable_expr}'"
+        out_label = f"[v{idx}]"
+        filter_parts.append(f"{last_label}[{idx + 2}:v]overlay={opts}{out_label}")
+        last_label = out_label
+
+    cmd += [
+        "-filter_complex", ";".join(filter_parts),
+        "-map", last_label,
+        "-map", "1:a",
         "-c:v", "libx264",
-        "-preset", "veryfast",  # 静帧+字幕内容，对画质影响可忽略，显著降低CPU耗时
+        "-preset", "veryfast",  # 静帧+贴图内容，对画质影响可忽略，显著降低CPU耗时
         "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-t", str(total_duration),
@@ -639,7 +578,7 @@ def _generate_still_video_with_subtitles_and_audio(
         output_path,
     ]
 
-    logger.info(f"[{uid}] 执行 ffmpeg 命令...")
+    logger.info(f"[{uid}] 执行 ffmpeg 定格视频合成: overlay {len(plan.overlays)} 个, 时长 {total_duration:.2f}s")
     try:
         with _HEAVY_FFMPEG_SEMAPHORE:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -765,9 +704,14 @@ def process_video_pipeline(
     search_box_image_url: str = "",
     bgm_url: str = "",
     bgm_volume: float = 0.6,
+    style_layers: Optional[dict] = None,
+    layer_context: Optional[dict] = None,
 ) -> dict:
     """
     核心视频处理管线，返回 dict 而非 JSON 字符串，便于程序化调用。
+
+    style_layers: 图层文档（见 tools.layer_model），None 时用内置默认（与旧版固定样式一致）
+    layer_context: 文字图层 text_source 的取值上下文，如 {"角色名": "梦宝"}
     """
     ctx = _get_ctx()
     tmp_dir = tempfile.gettempdir()
@@ -839,25 +783,36 @@ def process_video_pipeline(
         expire_time=2592000,
     )
 
-    # Step 4: 合成搜索框
-    logger.info(f"[{uid}] Step 4: 合成搜索框")
-    composite_path = os.path.join(tmp_dir, f"composite_{uid}.png")
-    _composite_search_box(
-        frame_image_path=last_frame_path,
-        search_box_image_url=search_box_image_url if search_box_image_url else None,
-        output_path=composite_path,
+    # Step 4: 图层合成（静态全程图层拍平进底图；动画/分段显示图层生成 overlay 规格）
+    logger.info(f"[{uid}] Step 4: 图层合成")
+    from tools.layer_model import resolve_layer_doc
+    from tools.layer_render import build_freeze_render_plan
+    if isinstance(style_layers, dict) and style_layers.get("layers"):
+        layer_doc = style_layers
+    else:
+        layer_doc = resolve_layer_doc()
+    plan = build_freeze_render_plan(
+        frame_path=last_frame_path,
+        canvas_w=video_w,
+        canvas_h=video_h,
+        layer_doc=layer_doc,
+        layer_context=layer_context or {},
+        search_box_image_url=search_box_image_url.strip() if search_box_image_url else "",
+        subtitle_segments=subtitle_segments,
+        segment_durations=segment_durations,
+        font_path=_find_chinese_font(),
+        tmp_dir=tmp_dir,
+        uid=uid,
     )
+    logger.info(f"[{uid}] 图层合成完成: 动态 overlay {len(plan.overlays)} 个")
 
     # Step 5: ffmpeg 生成定格视频
     logger.info(f"[{uid}] Step 5: ffmpeg 生成定格视频")
     freeze_video_local = os.path.join(tmp_dir, f"freeze_{uid}.mp4")
-    _generate_still_video_with_subtitles_and_audio(
-        composite_image_path=composite_path,
-        subtitle_segments=subtitle_segments,
-        segment_durations=segment_durations,
+    _generate_freeze_video_from_plan(
+        plan=plan,
         merged_audio_path=merged_audio_path,
-        video_width=video_w,
-        video_height=video_h,
+        total_duration=total_audio_duration,
         output_path=freeze_video_local,
         uid=uid,
     )
@@ -914,7 +869,8 @@ def process_video_pipeline(
         logger.info(f"[{uid}] BGM混音后视频URL: {final_video_url}")
 
     # 清理临时文件
-    for tmp_file in [last_frame_path, composite_path, freeze_video_local, merged_audio_path] + segment_audio_paths:
+    overlay_paths = [spec.path for spec in plan.overlays]
+    for tmp_file in [last_frame_path, plan.base_path, freeze_video_local, merged_audio_path] + segment_audio_paths + overlay_paths:
         try:
             if os.path.exists(tmp_file):
                 os.remove(tmp_file)
@@ -977,202 +933,24 @@ def process_ad_tail_video(
 
     返回：包含最终视频URL和处理详情的JSON字符串
     """
-    ctx = _get_ctx()
-    tmp_dir = tempfile.gettempdir()
-    uid = uuid.uuid4().hex[:12]
-
-    logger.info(f"[{uid}] 开始处理视频: {video_url}")
-
+    # 委托核心管线执行（此前这里是一份 230 行的重复实现，曾导致两处逻辑漂移）
     try:
-        # ============================================================
-        # Step 0: 下载用户视频，检测分辨率，重新上传到自有S3
-        # ============================================================
-        logger.info(f"[{uid}] Step 0: 下载用户视频并检测分辨率")
-        tmp_video = os.path.join(tmp_dir, f"input_{uid}.mp4")
-        _download_file(video_url, tmp_video)
-        video_w, video_h = _get_video_resolution(video_url)
-        logger.info(f"[{uid}] 原视频分辨率: {video_w}x{video_h}")
-
-        video_url = _upload_video_to_s3(tmp_video, f"temp/input_{uid}.mp4")
-        os.remove(tmp_video)
-        logger.info(f"[{uid}] 用户视频已重新上传到S3")
-
-        # ============================================================
-        # Step 1: 用 ffmpeg 提取最后一帧（黑屏检测 + 字幕检测 + Seedream 4.0 去字幕）
-        # ============================================================
-        logger.info(f"[{uid}] Step 1: 提取干净最后一帧（黑屏检测+字幕检测+去字幕）")
-        last_frame_path = os.path.join(tmp_dir, f"lastframe_{uid}.png")
-        _extract_clean_last_frame(video_url, last_frame_path, video_w, video_h, uid)
-        logger.info(f"[{uid}] 干净最后一帧已提取: {last_frame_path}")
-
-        # ============================================================
-        # Step 2: 字幕分段
-        # ============================================================
-        logger.info(f"[{uid}] Step 2: 字幕分段")
-        subtitle_segments = _split_subtitle(subtitle_text)
-        logger.info(f"[{uid}] 字幕分为 {len(subtitle_segments)} 段: {subtitle_segments}")
-
-        # ============================================================
-        # Step 3: 每段字幕分别 TTS → 获取实际时长 → 拼接音频
-        # ============================================================
-        logger.info(f"[{uid}] Step 3: 逐段 TTS 配音")
-        speaker = VOICE_OPTIONS.get(voice_name, "zh_female_mizai_saturn_bigtts")
-        tts_client = TTSClient(ctx=ctx)
-
-        segment_durations = []
-        segment_audio_paths = []
-        segment_audio_urls = []
-
-        for i, seg in enumerate(subtitle_segments):
-            seg_uid = f"ad_tail_{uid}_seg{i}"
-            audio_url, audio_size = tts_client.synthesize(
-                uid=seg_uid,
-                text=seg,
-                speaker=speaker,
-                audio_format="mp3",
-            )
-            dur = _get_audio_duration(audio_url)
-            segment_durations.append(dur)
-            segment_audio_urls.append(audio_url)
-
-            # 下载音频到本地用于后续拼接
-            local_seg = os.path.join(tmp_dir, f"tts_{uid}_seg{i}.mp3")
-            _download_file(audio_url, local_seg)
-            segment_audio_paths.append(local_seg)
-
-            logger.info(f"[{uid}] 段{i}「{seg}」TTS时长: {dur:.2f}s")
-
-        total_audio_duration = sum(segment_durations)
-        logger.info(f"[{uid}] TTS 总时长: {total_audio_duration:.2f}s")
-
-        # 拼接所有音频片段
-        merged_audio_path = os.path.join(tmp_dir, f"merged_audio_{uid}.mp3")
-        _concat_audio_files(segment_audio_paths, merged_audio_path, uid)
-
-        # 上传拼接后的音频到 S3（用于返回给用户）
-        merged_audio_url = _get_storage().generate_presigned_url(
-            key=_get_storage().stream_upload_file(
-                fileobj=open(merged_audio_path, "rb"),
-                file_name=f"temp/merged_audio_{uid}.mp3",
-                content_type="audio/mpeg",
-            ),
-            expire_time=2592000,
+        result = process_video_pipeline(
+            video_url=video_url,
+            guide_text=guide_text,
+            subtitle_text=subtitle_text,
+            voice_name=voice_name,
+            tail_name=tail_name,
+            tail_custom_url=tail_custom_url,
+            transition1_name=transition1_name,
+            transition2_name=transition2_name,
+            search_box_image_url=search_box_image_url,
+            bgm_url=bgm_url,
+            bgm_volume=bgm_volume,
         )
-
-        # ============================================================
-        # Step 4: 合成搜索框到定格帧
-        # ============================================================
-        logger.info(f"[{uid}] Step 4: 合成搜索框")
-        composite_path = os.path.join(tmp_dir, f"composite_{uid}.png")
-        _composite_search_box(
-            frame_image_path=last_frame_path,
-            search_box_image_url=search_box_image_url if search_box_image_url else None,
-            output_path=composite_path,
-        )
-
-        # ============================================================
-        # Step 5: ffmpeg 生成定格视频（含字幕 + 配音）
-        # ============================================================
-        logger.info(f"[{uid}] Step 5: ffmpeg 生成定格视频（含字幕+配音）")
-        freeze_video_local = os.path.join(tmp_dir, f"freeze_{uid}.mp4")
-        _generate_still_video_with_subtitles_and_audio(
-            composite_image_path=composite_path,
-            subtitle_segments=subtitle_segments,
-            segment_durations=segment_durations,
-            merged_audio_path=merged_audio_path,
-            video_width=video_w,
-            video_height=video_h,
-            output_path=freeze_video_local,
-            uid=uid,
-        )
-
-        freeze_video_url = _upload_video_to_s3(freeze_video_local, f"temp/freeze_{uid}.mp4")
-        logger.info(f"[{uid}] 定格视频URL: {freeze_video_url}")
-
-        # ============================================================
-        # Step 6: 拼接三段视频
-        # ============================================================
-        logger.info(f"[{uid}] Step 6: 拼接视频")
-
-        if tail_custom_url and tail_custom_url.strip():
-            tail_url = tail_custom_url.strip()
-        else:
-            tail_url = BUILTIN_TAILS.get(tail_name)
-            if not tail_url:
-                return json.dumps({
-                    "success": False,
-                    "error": f"未找到内置尾帧「{tail_name}」，可选：{list(BUILTIN_TAILS.keys())}"
-                }, ensure_ascii=False)
-
-        t1_id = TRANSITION_OPTIONS.get(transition1_name)
-        t2_id = TRANSITION_OPTIONS.get(transition2_name)
-
-        video_edit_client = VideoEditClient(ctx=ctx)
-        # transitions 是位置参数：只选一处转场时分两次拼接，确保转场落位正确
-        if bool(t1_id) == bool(t2_id):
-            concat_resp = video_edit_client.concat_videos(
-                videos=[video_url, freeze_video_url, tail_url],
-                transitions=[t1_id, t2_id] if t1_id else None,
-            )
-        else:
-            first_resp = video_edit_client.concat_videos(
-                videos=[video_url, freeze_video_url],
-                transitions=[t1_id] if t1_id else None,
-            )
-            concat_resp = video_edit_client.concat_videos(
-                videos=[first_resp.url, tail_url],
-                transitions=[t2_id] if t2_id else None,
-            )
-        final_video_url = concat_resp.url
-        logger.info(f"[{uid}] 拼接后视频URL: {final_video_url}")
-
-        # ============================================================
-        # Step 7: 可选 BGM 混音
-        # ============================================================
-        if bgm_url and bgm_url.strip():
-            logger.info(f"[{uid}] Step 7: BGM 混音 (volume={bgm_volume})")
-            bgm_output = os.path.join(tmp_dir, f"final_with_bgm_{uid}.mp4")
-            _mix_bgm(
-                video_url=final_video_url,
-                bgm_url=bgm_url.strip(),
-                bgm_volume=bgm_volume,
-                output_path=bgm_output,
-                uid=uid,
-            )
-            final_video_url = _upload_video_to_s3(bgm_output, f"temp/final_with_bgm_{uid}.mp4")
-            logger.info(f"[{uid}] BGM混音后视频URL: {final_video_url}")
-
-        # ============================================================
-        # 清理临时文件
-        # ============================================================
-        for tmp_file in [last_frame_path, composite_path, freeze_video_local, merged_audio_path] + segment_audio_paths:
-            try:
-                if os.path.exists(tmp_file):
-                    os.remove(tmp_file)
-            except Exception:
-                pass
-
-        return json.dumps({
-            "success": True,
-            "final_video_url": final_video_url,
-            "details": {
-                "audio_url": merged_audio_url,
-                "audio_duration_sec": round(total_audio_duration, 2),
-                "freeze_video_url": freeze_video_url,
-                "tail_used": tail_name if not tail_custom_url else "自定义尾帧",
-                "voice_used": voice_name,
-                "transition1": transition1_name,
-                "transition2": transition2_name,
-                "subtitle_segments": subtitle_segments,
-                "segment_durations": [round(d, 2) for d in segment_durations],
-                "video_resolution": f"{video_w}x{video_h}",
-                "bgm_applied": bool(bgm_url and bgm_url.strip()),
-                "bgm_volume": bgm_volume if bgm_url and bgm_url.strip() else None,
-            }
-        }, ensure_ascii=False)
-
+        return json.dumps(result, ensure_ascii=False)
     except Exception as e:
-        logger.error(f"[{uid}] 处理失败: {str(e)}", exc_info=True)
+        logger.error(f"视频处理失败: {str(e)}", exc_info=True)
         return json.dumps({
             "success": False,
             "error": f"视频处理失败: {str(e)}",

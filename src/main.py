@@ -880,25 +880,37 @@ def _extract_text_from_event(event: dict) -> str:
         return ""
 
 
+# 默认绑定的多维表格：零参数「批量处理」直接用它，可被环境变量覆盖
+DEFAULT_BITABLE_APP_TOKEN = os.getenv("DEFAULT_BITABLE_APP_TOKEN", "JOMibWw3wa6TzYsaHSIcAG27n2f")
+DEFAULT_BITABLE_TABLE_ID = os.getenv("DEFAULT_BITABLE_TABLE_ID", "tblWNUywhvrkJ54u")
+
+
 def _parse_batch_command(text: str) -> dict | None:
     """
-    解析批量处理命令。
-    支持格式：
-    - 批量处理 app_token=xxx table_id=xxx
-    - 开始批量处理 app_token=xxx table_id=xxx
-    - 处理多维表格 app_token=xxx table_id=xxx
+    解析批量处理命令，按优先级支持三种形式：
+    1. 显式参数：批量处理 app_token=xxx table_id=xxx
+    2. 表格分享链接：批量处理 https://xxx.feishu.cn/base/<app_token>?table=<table_id>
+    3. 零参数：「批量处理」→ 使用默认绑定的表格
     """
-    patterns = [
-        r"app_token[=:：]\s*([a-zA-Z0-9_]+)",
-        r"table_id[=:：]\s*([a-zA-Z0-9_-]+)",
-    ]
-    app_token_match = re.search(patterns[0], text)
-    table_id_match = re.search(patterns[1], text)
-
+    app_token_match = re.search(r"app_token[=:：]\s*([a-zA-Z0-9_]+)", text)
+    table_id_match = re.search(r"table_id[=:：]\s*([a-zA-Z0-9_-]+)", text)
     if app_token_match and table_id_match:
         return {
             "app_token": app_token_match.group(1),
             "table_id": table_id_match.group(1),
+        }
+
+    url_match = re.search(r"/base/([a-zA-Z0-9]+)\?\S*?table=(tbl[a-zA-Z0-9]+)", text)
+    if url_match:
+        return {
+            "app_token": url_match.group(1),
+            "table_id": url_match.group(2),
+        }
+
+    if "批量处理" in text:
+        return {
+            "app_token": DEFAULT_BITABLE_APP_TOKEN,
+            "table_id": DEFAULT_BITABLE_TABLE_ID,
         }
     return None
 
@@ -1121,7 +1133,8 @@ def _get_help_text() -> str:
         "1️⃣ **创建表格**\n"
         "「创建表格」或「帮我创建「广告尾帧批量处理」」\n\n"
         "2️⃣ **批量处理**\n"
-        "「批量处理 app_token=xxx table_id=xxx」\n\n"
+        "「批量处理」→ 处理默认表格中所有「待处理」记录\n"
+        "也可以带上表格链接或 app_token=xxx table_id=xxx 指定其他表格\n\n"
         "3️⃣ **单条处理**\n"
         "「处理视频 https://xxx.mp4 尾帧：派对接引尾帧 音色：可爱女生」\n\n"
         "4️⃣ **预览**\n"

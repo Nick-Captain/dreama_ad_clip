@@ -270,12 +270,18 @@ def _vision_detect_subtitle(image_url: str) -> dict:
                     chunk = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                # 末尾的 usage 统计分片 choices 为空数组，需跳过
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
                 answer_parts.append(delta.get("content") or "")
             answer = "".join(answer_parts).strip()
         elif "json" in content_type:
             data = resp.json()
-            answer = str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+            choices = data.get("choices") or []
+            message = choices[0].get("message", {}) if choices else {}
+            answer = str(message.get("content", "")).strip()
         else:
             diag["error"] = f"网关返回无法识别的 Content-Type: {diag['content_type']}"
             return diag

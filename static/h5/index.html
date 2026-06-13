@@ -102,6 +102,8 @@ body.dragging { user-select: none; -webkit-user-select: none; }
 #settings-panel { flex: none; width: 286px; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 86px); overflow: auto; }
 #settings-panel .props { gap: 9px; }
 #settings-panel .ptitle { font-weight: 600; }
+/* 设置面板标签固定宽度，使所有下拉框左右对齐 */
+#settings-panel .row > label { width: 68px; min-width: 68px; display: inline-flex; align-items: center; gap: 3px; }
 .ttip { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--muted); color: var(--muted); font-size: 10px; font-style: italic; cursor: help; flex: none; margin-left: 4px; }
 .ttip:hover { border-color: var(--brand); color: var(--brand); }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
@@ -1178,10 +1180,11 @@ function renderVideoSettings() {
   voiceRow.appendChild(voiceSel); body.appendChild(voiceRow);
   // 转场
   const TRANS_TIP = '转场由云端服务渲染，不稳定时会不生效（退化为无转场）';
-  const infoIcon = () => { const i = document.createElement('span'); i.className = 'ttip'; i.textContent = 'i'; i.title = TRANS_TIP; return i; };
-  const t1Row = row('<label>转场1</label>'); const t1 = selOf(o.transitions, s.transition1 || (o.transitions || [])[0]); t1Row.appendChild(t1); t1Row.appendChild(infoIcon()); body.appendChild(t1Row);
+  const t1Row = row(`<label>转场1 <span class="ttip" title="${TRANS_TIP}">i</span></label>`);
+  const t1 = selOf(o.transitions, s.transition1 || (o.transitions || [])[0]); t1Row.appendChild(t1); body.appendChild(t1Row);
   body.appendChild(row('<span class="muted">转场1：用户视频 → 定格帧</span>'));
-  const t2Row = row('<label>转场2</label>'); const t2 = selOf(o.transitions, s.transition2 || (o.transitions || [])[0]); t2Row.appendChild(t2); t2Row.appendChild(infoIcon()); body.appendChild(t2Row);
+  const t2Row = row(`<label>转场2 <span class="ttip" title="${TRANS_TIP}">i</span></label>`);
+  const t2 = selOf(o.transitions, s.transition2 || (o.transitions || [])[0]); t2Row.appendChild(t2); body.appendChild(t2Row);
   body.appendChild(row('<span class="muted">转场2：定格帧 → 广告尾帧</span>'));
   // BGM
   const bgmCard = document.createElement('div'); bgmCard.className = 'subcard'; bgmCard.innerHTML = '<span class="tt">背景音乐 BGM</span>'; body.appendChild(bgmCard);

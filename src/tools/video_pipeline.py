@@ -949,27 +949,20 @@ def process_video_pipeline(
 
     video_edit_client = VideoEditClient(ctx=ctx)
     logger.info(f"[{uid}] 转场: 转场1={transition1_name}({t1_id}) 转场2={transition2_name}({t2_id})")
-    # transitions 是位置参数：第0个作用于视频1→2，第1个作用于视频2→3。
-    # 只选其中一处转场时不能传单元素列表（会错位/扩散到别的衔接处），
-    # 改为分两次拼接，确保转场只落在用户选择的位置。
-    if bool(t1_id) == bool(t2_id):
-        _tr = [t1_id, t2_id] if t1_id else None
-        logger.info(f"[{uid}] 一次拼接 videos=3 transitions={_tr}")
-        concat_resp = video_edit_client.concat_videos(
-            videos=[video_url, freeze_video_url, tail_url],
-            transitions=_tr,
-        )
-        logger.info(f"[{uid}] 拼接响应: url={getattr(concat_resp, 'url', None)}")
-    else:
-        logger.info(f"[{uid}] 分两次拼接 transitions1={[t1_id] if t1_id else None} transitions2={[t2_id] if t2_id else None}")
-        first_resp = video_edit_client.concat_videos(
-            videos=[video_url, freeze_video_url],
-            transitions=[t1_id] if t1_id else None,
-        )
-        concat_resp = video_edit_client.concat_videos(
-            videos=[first_resp.url, tail_url],
-            transitions=[t2_id] if t2_id else None,
-        )
+    # 始终两两拼接：云端对"3 段一次拼 + 转场数组"不生效（退化硬切），
+    # 而"2 段拼 + 单个转场"已验证可用。逐段拼接让两个转场都落位。
+    logger.info(f"[{uid}] 拼接① [用户视频→定格帧] transitions={[t1_id] if t1_id else None}")
+    first_resp = video_edit_client.concat_videos(
+        videos=[video_url, freeze_video_url],
+        transitions=[t1_id] if t1_id else None,
+    )
+    logger.info(f"[{uid}] 拼接①响应: {first_resp!r}")
+    logger.info(f"[{uid}] 拼接② [→广告尾帧] transitions={[t2_id] if t2_id else None}")
+    concat_resp = video_edit_client.concat_videos(
+        videos=[first_resp.url, tail_url],
+        transitions=[t2_id] if t2_id else None,
+    )
+    logger.info(f"[{uid}] 拼接②响应: {concat_resp!r}")
     final_video_url = concat_resp.url
     logger.info(f"[{uid}] 拼接后视频URL: {final_video_url}")
 

@@ -98,6 +98,45 @@ def _classify_material_url(url: str) -> str:
     return "unknown"
 
 
+def _short_tail_name(tail_name: str, tail_custom_url: str) -> str:
+    """尾帧简称：派对接引尾帧→派对尾帧、短剧推广尾帧→短剧尾帧、自定义→自定义尾帧。"""
+    if tail_custom_url and tail_custom_url.strip():
+        return "自定义尾帧"
+    t = (tail_name or "").strip()
+    if t.endswith("尾帧") and len(t) > 2:
+        return t[:2] + "尾帧"
+    return t or "尾帧"
+
+
+def _rename_output(final_url: str, video_name: str, created_ms, tail_name: str, tail_custom_url: str, uid: str) -> str:
+    """把成片转存到我们的存储，命名为「日期-原文件名-尾帧简称.mp4」，返回新URL；失败则返回原URL。"""
+    import os
+    import tempfile
+    import datetime
+    from tools.video_pipeline import _download_file, _get_storage
+    try:
+        if isinstance(created_ms, (int, float)) and created_ms:
+            date_s = datetime.datetime.fromtimestamp(created_ms / 1000).strftime("%Y%m%d")
+        else:
+            date_s = datetime.datetime.now().strftime("%Y%m%d")
+        base = os.path.splitext((video_name or "").strip())[0] or "视频"
+        base = re.sub(r'[\\/:*?"<>|]+', "", base) or "视频"
+        fname = f"{date_s}-{base}-{_short_tail_name(tail_name, tail_custom_url)}.mp4"
+        tmp = os.path.join(tempfile.gettempdir(), f"named_out_{uid}.mp4")
+        _download_file(final_url, tmp)
+        storage = _get_storage()
+        with open(tmp, "rb") as f:
+            key = storage.stream_upload_file(fileobj=f, file_name=f"ad_tail_output/{fname}", content_type="video/mp4")
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return storage.generate_presigned_url(key=key, expire_time=2592000)
+    except Exception as e:
+        logger.warning(f"[批量处理] 成片规范命名失败，用原URL: {e}")
+        return final_url
+
+
 # ============================================================
 # 批量处理工具
 # ============================================================
@@ -303,7 +342,13 @@ def batch_process_from_bitable(
                     result_data = result
 
                     if result_data.get("success"):
-                        # 成功：写回输出URL；如有旧链接则备份说明，否则清空过期的错误信息
+                        # 成功：成片规范命名（日期-原名-尾帧）后写回输出URL
+                        final_url = result_data.get("final_video_url", "")
+                        if final_url:
+                            final_url = _rename_output(
+                                final_url, field_to_text(fields.get("视频名")),
+                                fields.get("创作日期"), _tail_name, _tail_custom_url, record_id,
+                            )
                         if old_output_url:
                             note = f"提示：本条为重新处理，旧输出视频已被覆盖。旧链接备份：{old_output_url}"
                         else:
@@ -315,13 +360,13 @@ def batch_process_from_bitable(
                                 "record_id": record_id,
                                 "fields": {
                                     "处理状态": "成功",
-                                    "输出视频URL": result_data.get("final_video_url", ""),
+                                    "输出视频URL": final_url,
                                     "错误信息": note,
                                 },
                             }],
                         )
                         logger.info(f"[批量处理] 成功: record_id={record_id}")
-                        return {"record_id": record_id, "status": "success", "url": result_data.get("final_video_url")}
+                        return {"record_id": record_id, "status": "success", "url": final_url}
                     else:
                         raise Exception(result_data.get("error", "未知错误"))
 

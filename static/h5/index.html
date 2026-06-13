@@ -950,7 +950,7 @@ function renderProps() {
     up.textContent = S.searchBoxUrl ? '更换搜索框图片' : '上传搜索框图片';
     up.onclick = () => $('fileSearchBox').click();
     const ur = row(''); ur.appendChild(up); p.appendChild(ur);
-    if (!S.searchBoxUrl) p.appendChild(row('<span class="muted">该记录还没有搜索框图片，点上方按钮上传（也可在表格「搜索框图片」列上传）</span>'));
+    if (!S.searchBoxUrl) p.appendChild(row('<span class="muted">该记录还没有搜索框图片，点上方按钮上传</span>'));
     p.appendChild(sliderRow('大小', 0.2, 1.0, 0.01, layer.scale ?? 0.7, v => Math.round(v * 100) + '%', v => {
       layer.scale = v; const n = S.nodes.get(lid(layer));
       if (n) { const W = S.stage.width(); const ratio = n.height() / n.width(); const c = getCenter(n);

@@ -212,31 +212,9 @@ def batch_process_from_bitable(
                 transition1 = field_to_text(fields.get("转场1"))
                 transition2 = field_to_text(fields.get("转场2"))
 
-                # 搜索框/BGM：优先附件列，兼容旧URL列，最后用「素材URL」备用列补位
-                search_box_url = ""
-                bgm_url = ""
-                if fields.get("搜索框图片"):
-                    try:
-                        search_box_url = attachment_to_download_url(client, fields.get("搜索框图片"))
-                    except Exception as att_err:
-                        logger.warning(f"[批量处理] record_id={record_id} 读取附件「搜索框图片」失败: {att_err}")
-                if fields.get("BGM"):
-                    try:
-                        bgm_url = attachment_to_download_url(client, fields.get("BGM"))
-                    except Exception as att_err:
-                        logger.warning(f"[批量处理] record_id={record_id} 读取附件「BGM」失败: {att_err}")
-                if not search_box_url:
-                    search_box_url = field_to_text(fields.get("搜索框图片URL")).strip()
-                if not bgm_url:
-                    bgm_url = field_to_text(fields.get("BGM URL")).strip()
-                for material_url in filter(None, re.split(r"[\s,，;；]+", field_to_text(fields.get("素材URL")).strip())):
-                    kind = _classify_material_url(material_url)
-                    if kind == "image" and not search_box_url:
-                        search_box_url = material_url
-                    elif kind == "audio" and not bgm_url:
-                        bgm_url = material_url
-                    elif kind == "unknown":
-                        logger.warning(f"[批量处理] record_id={record_id} 素材URL无法识别类型，已忽略: {material_url[:100]}")
+                # 搜索框/BGM：直接读 URL 列（附件列与「素材URL」备用列已废弃删除）
+                search_box_url = field_to_text(fields.get("搜索框图片URL")).strip()
+                bgm_url = field_to_text(fields.get("BGM URL")).strip()
 
                 logger.info(f"[批量处理] 开始处理: record_id={record_id}")
 

@@ -143,24 +143,12 @@ TEMPLATE_FIELDS = [
         },
     },
     {
-        "field_name": "搜索框图片",
-        "type": 17,  # 附件
-    },
-    {
         "field_name": "搜索框图片URL",
-        "type": 1,  # 文本：H5 编辑器内上传的搜索框图片直链；附件列优先，此列兜底。预览与成片均读取
-    },
-    {
-        "field_name": "BGM",
-        "type": 17,  # 附件
+        "type": 1,  # 文本：H5 编辑器内上传的搜索框图片直链。预览与成片均读取
     },
     {
         "field_name": "BGM URL",
-        "type": 1,  # 文本：H5 编辑器内上传的 BGM 直链；附件列优先，此列兜底
-    },
-    {
-        "field_name": "素材URL",
-        "type": 1,  # 文本：备用入口，可放多个URL，图片自动归为搜索框、音频归为BGM
+        "type": 1,  # 文本：H5 编辑器内上传的 BGM 直链
     },
     {
         "field_name": "BGM音量",
@@ -193,10 +181,6 @@ TEMPLATE_FIELDS = [
         "type": 1,  # 文本：H5 编辑器托管的图层 JSON，用户不手填
     },
     {
-        "field_name": "调整链接",
-        "type": 15,  # 超链接：该记录专属的 H5 编辑器入口
-    },
-    {
         "field_name": "处理状态",
         "type": 3,  # 单选
         "property": {
@@ -210,10 +194,6 @@ TEMPLATE_FIELDS = [
     },
     {
         "field_name": "输出视频URL",
-        "type": 1,  # 文本
-    },
-    {
-        "field_name": "预览图URL",
         "type": 1,  # 文本
     },
     {
@@ -350,7 +330,8 @@ class BitableClient:
 
 
 # 历史遗留的冗余列：新建 Base 自带的示例列 + 旧版模板的重复/改版字段
-LEGACY_FIELDS_TO_DELETE = ("文本", "单选", "日期", "字幕")
+LEGACY_FIELDS_TO_DELETE = ("文本", "单选", "日期", "字幕",
+                          "素材URL", "预览图URL", "搜索框图片", "BGM", "调整链接")
 
 
 def _count_field_usage(client: "BitableClient", app_token: str, table_id: str, field_names: list) -> dict:
@@ -586,15 +567,13 @@ def get_bitable_records(
                 "广告尾帧": field_to_text(fields.get("广告尾帧")),
                 "配音音色": field_to_text(fields.get("配音音色")),
                 "引导语": field_to_text(fields.get("引导语")),
-                "搜索框图片数": _attachment_count("搜索框图片"),
-                "BGM附件数": _attachment_count("BGM"),
-                "素材URL": field_to_text(fields.get("素材URL")),
+                "搜索框图片URL": field_to_text(fields.get("搜索框图片URL")),
+                "BGM URL": field_to_text(fields.get("BGM URL")),
                 "BGM音量": fields.get("BGM音量", ""),
                 "转场1": field_to_text(fields.get("转场1")),
                 "转场2": field_to_text(fields.get("转场2")),
                 "处理状态": field_to_text(fields.get("处理状态")),
                 "输出视频URL": field_to_text(fields.get("输出视频URL")),
-                "预览图URL": field_to_text(fields.get("预览图URL")),
                 "错误信息": field_to_text(fields.get("错误信息")),
             })
 
@@ -619,7 +598,6 @@ def update_bitable_record(
     record_id: str,
     status: str = "",
     output_video_url: str = "",
-    preview_url: str = "",
     error_message: str = "",
 ) -> str:
     """
@@ -631,7 +609,6 @@ def update_bitable_record(
     - record_id: 记录 ID（必填）
     - status: 处理状态，可选：待处理/处理中/成功/失败
     - output_video_url: 输出视频URL
-    - preview_url: 预览图URL
     - error_message: 错误信息
 
     返回：更新结果的 JSON 字符串
@@ -643,8 +620,6 @@ def update_bitable_record(
             fields["处理状态"] = status
         if output_video_url:
             fields["输出视频URL"] = output_video_url
-        if preview_url:
-            fields["预览图URL"] = preview_url
         if error_message:
             fields["错误信息"] = error_message
 

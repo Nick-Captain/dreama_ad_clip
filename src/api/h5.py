@@ -106,7 +106,6 @@ def _record_summary(item: dict) -> dict:
         "guide_text": field_to_text(fields.get("引导语")).strip(),
         "status": field_to_text(fields.get("处理状态")).strip(),
         "output_video_url": output,
-        "preview_url": field_to_text(fields.get("预览图URL")).strip(),
         "thumbnail_url": field_to_text(fields.get("缩略图URL")).strip(),
         "created_at": created if isinstance(created, (int, float)) else None,
         "error": field_to_text(fields.get("错误信息")).strip(),
@@ -128,10 +127,10 @@ def _is_blank_row(fields: dict) -> bool:
     from tools.bitable_tool import field_to_text
     if field_to_text(fields.get("视频URL")).strip():
         return False
-    for att in ("视频附件", "附件", "搜索框图片", "BGM"):
+    for att in ("视频附件", "附件"):
         if fields.get(att):
             return False
-    for col in ("视频名", "处理状态", "输出视频URL", "样式参数", "角色名", "素材URL", "自定义尾帧URL"):
+    for col in ("视频名", "处理状态", "输出视频URL", "样式参数", "角色名", "自定义尾帧URL"):
         if field_to_text(fields.get(col)).strip():
             return False
     return True
@@ -314,24 +313,8 @@ async def api_params_get(request: Request):
             source = "global"
         else:
             source = "builtin"
-        search_box_url = ""
-        if fields.get("搜索框图片"):
-            try:
-                search_box_url = attachment_to_download_url(BitableClient(), fields.get("搜索框图片"))
-            except Exception as e:
-                logger.warning(f"[h5/params] 搜索框附件读取失败: {e}")
-        if not search_box_url:
-            search_box_url = field_to_text(fields.get("搜索框图片URL")).strip()
-
-        # BGM 直链：附件优先，其次「BGM URL」列
-        bgm_url = ""
-        if fields.get("BGM"):
-            try:
-                bgm_url = attachment_to_download_url(BitableClient(), fields.get("BGM"))
-            except Exception as e:
-                logger.warning(f"[h5/params] BGM 附件读取失败: {e}")
-        if not bgm_url:
-            bgm_url = field_to_text(fields.get("BGM URL")).strip()
+        search_box_url = field_to_text(fields.get("搜索框图片URL")).strip()
+        bgm_url = field_to_text(fields.get("BGM URL")).strip()
 
         from tools.video_pipeline import BUILTIN_TAILS, VOICE_OPTIONS, TRANSITION_OPTIONS
 
@@ -485,16 +468,6 @@ async def api_render(request: Request):
                         os.remove(p)
                 except Exception:
                     pass
-        record_id = payload.get("record_id", "")
-        if record_id:
-            try:
-                from tools.bitable_tool import BitableClient
-                BitableClient().update_records(
-                    app_token, table_id,
-                    [{"record_id": record_id, "fields": {"预览图URL": preview_url}}],
-                )
-            except Exception as e:
-                logger.warning(f"[h5/render] 预览图URL写回失败: {e}")
         return {"preview_url": preview_url}
 
     return await asyncio.to_thread(_run)
@@ -736,7 +709,7 @@ async def api_upload_finish(request: Request):
 
 @router.post("/records")
 async def api_records(request: Request):
-    """记录列表（H5 首页），顺带回填缺失的「调整链接」"""
+    """记录列表（H5 首页）"""
     payload = await _json_body(request)
     app_token, table_id = _table_of(payload)
 
@@ -750,20 +723,6 @@ async def api_records(request: Request):
             if not resp.get("data", {}).get("has_more"):
                 break
             page_token = resp.get("data", {}).get("page_token")
-
-        backfill = []
-        for item in items:
-            if not item.get("fields", {}).get("调整链接"):
-                link = f"{PUBLIC_BASE_URL}/h5/?record_id={item.get('record_id')}"
-                backfill.append({
-                    "record_id": item.get("record_id"),
-                    "fields": {"调整链接": {"link": link, "text": "调整样式"}},
-                })
-        if backfill:
-            try:
-                client.update_records(app_token, table_id, backfill)
-            except Exception as e:
-                logger.warning(f"[h5/records] 调整链接回填失败: {e}")
 
         records = [_record_summary(it) for it in items]
         records.sort(key=lambda r: r.get("created_at") or 0, reverse=True)

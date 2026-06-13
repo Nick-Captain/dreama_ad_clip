@@ -384,45 +384,24 @@ def _extract_clean_last_frame(video_url: str, output_path: str, video_w: int, vi
     3. 检测是否有字幕 → 是：用 Seedream 4.0 去字幕
     4. 返回干净帧
 
-    skip_subtitle_removal=True 时跳过第 3 步（H5 快速预览用，秒级返回）
+    skip_subtitle_removal=True 时跳过去字幕（H5 快速预览、「标准」模式用）。
+    注：旧的黑屏自动回退方案已废弃——是否去字幕/是否走黑屏渐显由「末帧模式」显式决定。
     """
     tmp_v = os.path.join(tempfile.gettempdir(), f"lastframe_src_{uid}.mp4")
     _download_file(video_url, tmp_v)
     duration = _get_video_duration(tmp_v)
 
-    # Step 1: 提取最后一帧
+    # 提取最后一帧（不再做黑屏回退）
     seek_time = max(0, duration - 0.1)
     _extract_frame_at_time(tmp_v, seek_time, output_path)
     logger.info(f"[{uid}] 提取最后一帧 (t={seek_time:.2f}s)")
 
-    # Step 2: 黑屏检测 → 回退找非黑帧
-    if _is_black_frame(output_path):
-        logger.info(f"[{uid}] 最后一帧为黑屏，向前回退寻找非黑帧")
-        found_non_black = False
-
-        for step in range(1, 11):  # 最多回退 5 秒 (10 * 0.5s)
-            back_time = max(0, duration - 0.1 - step * 0.5)
-            if back_time <= 0:
-                break
-            _extract_frame_at_time(tmp_v, back_time, output_path)
-            if not _is_black_frame(output_path):
-                logger.info(f"[{uid}] 在回退 {step * 0.5:.1f}s 处找到非黑帧 (t={back_time:.2f}s)")
-                found_non_black = True
-                break
-
-        if not found_non_black:
-            logger.warning(f"[{uid}] 回退范围内均为黑屏，使用回退最远的帧")
-
-    # Step 3: 字幕检测 → Seedream 4.0 去字幕
+    # 去字幕（仅「去字幕」模式）：Seedream 4.0
     if skip_subtitle_removal:
         os.remove(tmp_v)
         return output_path
-    if _frame_has_subtitle(output_path):
-        logger.info(f"[{uid}] 帧画面有字幕，使用 Seedream 4.0 去除")
-        _remove_subtitle_with_seedream(output_path, output_path, video_w, video_h, uid)
-    else:
-        logger.info(f"[{uid}] 帧画面无字幕，直接使用")
-
+    logger.info(f"[{uid}] 末帧模式=去字幕，使用 Seedream 4.0 去除字幕")
+    _remove_subtitle_with_seedream(output_path, output_path, video_w, video_h, uid)
     os.remove(tmp_v)
     return output_path
 
@@ -562,11 +541,17 @@ def _generate_freeze_video_from_plan(
     filter_parts = ["[0:v]fps=30[base0]"]
     last_label = "[base0]"
     for idx, spec in enumerate(plan.overlays):
+        ov_in = f"[{idx + 2}:v]"
+        prefilter = getattr(spec, "prefilter", None)
+        if prefilter:
+            pf_label = f"[pf{idx}]"
+            filter_parts.append(f"{ov_in}{prefilter}{pf_label}")
+            ov_in = pf_label
         opts = f"x={spec.x_expr}:y={spec.y_expr}"
         if spec.enable_expr:
             opts += f":enable='{spec.enable_expr}'"
         out_label = f"[v{idx}]"
-        filter_parts.append(f"{last_label}[{idx + 2}:v]overlay={opts}{out_label}")
+        filter_parts.append(f"{last_label}{ov_in}overlay={opts}{out_label}")
         last_label = out_label
 
     cmd += [
@@ -597,6 +582,38 @@ def _generate_freeze_video_from_plan(
         raise RuntimeError(f"ffmpeg 生成定格视频失败: {stderr_tail}")
 
     logger.info(f"[{uid}] ffmpeg 定格视频生成成功: {output_path}")
+    return output_path
+
+
+def _generate_fadein_over_video(video_local: str, group_png: str, fade_seconds: float, output_path: str, uid: str) -> str:
+    """黑屏渐显模式：把图层组以渐显方式叠加到用户视频末尾 fade_seconds 秒（无配音、无中间帧）。"""
+    dur = _get_video_duration(video_local)
+    st = max(0.0, dur - float(fade_seconds or 4.0))
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_local,
+        "-loop", "1", "-i", group_png,
+        "-filter_complex",
+        (
+            f"[1:v]format=rgba,fade=t=in:st={st:.3f}:d={float(fade_seconds or 4.0):.3f}:alpha=1[g];"
+            f"[0:v][g]overlay=0:0:enable='gte(t,{st:.3f})'[v]"
+        ),
+        "-map", "[v]", "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-t", str(dur), "-shortest",
+        output_path,
+    ]
+    logger.info(f"[{uid}] 黑屏渐显合成: 视频时长={dur:.2f}s, 末段渐显 st={st:.2f}s d={fade_seconds}s")
+    try:
+        with _HEAVY_FFMPEG_SEMAPHORE:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg 黑屏渐显合成超时（600秒），请稍后重试")
+    if result.returncode != 0:
+        stderr_tail = result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
+        logger.error(f"[{uid}] 黑屏渐显 ffmpeg 失败: {stderr_tail}")
+        raise RuntimeError(f"黑屏渐显合成失败: {stderr_tail}")
     return output_path
 
 
@@ -723,6 +740,8 @@ def process_video_pipeline(
     bgm_volume: float = 0.6,
     bgm_fade_in: float = 0.0,
     bgm_fade_out: float = 0.0,
+    frame_mode: str = "标准",
+    fade_seconds: float = 4.0,
     style_layers: Optional[dict] = None,
     layer_context: Optional[dict] = None,
 ) -> dict:
@@ -745,6 +764,64 @@ def process_video_pipeline(
     video_w, video_h = _get_video_resolution(video_url)
     logger.info(f"[{uid}] 原视频分辨率: {video_w}x{video_h}")
 
+    # ===== 黑屏渐显模式：无中间帧、无配音，在用户视频末段渐显图层后直接拼接尾帧 =====
+    if frame_mode == "黑屏渐显":
+        from tools.layer_render import render_overlay_group
+        from tools.layer_model import resolve_layer_doc as _resolve_doc
+        # 取显示尺寸（带旋转视频的实际像素），抽一帧量尺寸
+        probe_frame = os.path.join(tmp_dir, f"dim_{uid}.png")
+        try:
+            _extract_frame_at_time(tmp_video, max(0.0, _get_video_duration(tmp_video) * 0.5), probe_frame)
+            with Image.open(probe_frame) as _im:
+                cw, ch = _im.size
+        finally:
+            try:
+                os.remove(probe_frame)
+            except Exception:
+                pass
+        _doc = style_layers if (isinstance(style_layers, dict) and style_layers.get("layers")) else _resolve_doc()
+        group_png = os.path.join(tmp_dir, f"group_{uid}.png")
+        render_overlay_group(cw, ch, _doc, layer_context or {}, (search_box_image_url or "").strip(),
+                             guide_text or DEFAULT_GUIDE_TEXT, _find_chinese_font(), group_png)
+        fadein_local = os.path.join(tmp_dir, f"fadein_{uid}.mp4")
+        _generate_fadein_over_video(tmp_video, group_png, fade_seconds, fadein_local, uid)
+        main_url = _upload_video_to_s3(fadein_local, f"temp/fadein_{uid}.mp4")
+        if tail_custom_url and tail_custom_url.strip():
+            tail_url = tail_custom_url.strip()
+        else:
+            tail_url = BUILTIN_TAILS.get(tail_name)
+            if not tail_url:
+                raise ValueError(f"未找到内置尾帧「{tail_name}」，可选：{list(BUILTIN_TAILS.keys())}")
+        t2_id = TRANSITION_OPTIONS.get(transition2_name)
+        logger.info(f"[{uid}] 黑屏渐显拼接: [渐显视频, 尾帧] 转场2={transition2_name}({t2_id})")
+        concat_resp = VideoEditClient(ctx=ctx).concat_videos(
+            videos=[main_url, tail_url], transitions=[t2_id] if t2_id else None)
+        final_video_url = concat_resp.url
+        logger.info(f"[{uid}] 黑屏渐显拼接结果: {final_video_url}")
+        if bgm_url and bgm_url.strip():
+            bgm_out = os.path.join(tmp_dir, f"final_bgm_{uid}.mp4")
+            _mix_bgm(final_video_url, bgm_url.strip(), bgm_volume, bgm_out, uid,
+                     fade_in=bgm_fade_in, fade_out=bgm_fade_out)
+            final_video_url = _upload_video_to_s3(bgm_out, f"temp/final_bgm_{uid}.mp4")
+            for p in (bgm_out,):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        for p in (tmp_video, group_png, fadein_local):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        logger.info(f"[{uid}] 黑屏渐显模式完成: {final_video_url}")
+        return {
+            "success": True,
+            "final_video_url": final_video_url,
+            "freeze_video_url": main_url,
+            "frame_mode": frame_mode,
+            "transition2": transition2_name,
+        }
+
     video_url = _upload_video_to_s3(tmp_video, f"temp/input_{uid}.mp4")
     os.remove(tmp_video)
     logger.info(f"[{uid}] 用户视频已重新上传到S3")
@@ -752,8 +829,9 @@ def process_video_pipeline(
     # Step 1: 提取干净最后一帧（黑屏检测+字幕检测+去字幕）
     logger.info(f"[{uid}] Step 1: 提取干净最后一帧")
     last_frame_path = os.path.join(tmp_dir, f"lastframe_{uid}.png")
-    _extract_clean_last_frame(video_url, last_frame_path, video_w, video_h, uid)
-    logger.info(f"[{uid}] 干净最后一帧已提取: {last_frame_path}")
+    _extract_clean_last_frame(video_url, last_frame_path, video_w, video_h, uid,
+                              skip_subtitle_removal=(frame_mode != "去字幕"))
+    logger.info(f"[{uid}] 干净最后一帧已提取 (模式={frame_mode}): {last_frame_path}")
 
     # Step 2: 字幕分段
     logger.info(f"[{uid}] Step 2: 字幕分段")
@@ -853,15 +931,20 @@ def process_video_pipeline(
     t2_id = TRANSITION_OPTIONS.get(transition2_name)
 
     video_edit_client = VideoEditClient(ctx=ctx)
+    logger.info(f"[{uid}] 转场: 转场1={transition1_name}({t1_id}) 转场2={transition2_name}({t2_id})")
     # transitions 是位置参数：第0个作用于视频1→2，第1个作用于视频2→3。
     # 只选其中一处转场时不能传单元素列表（会错位/扩散到别的衔接处），
     # 改为分两次拼接，确保转场只落在用户选择的位置。
     if bool(t1_id) == bool(t2_id):
+        _tr = [t1_id, t2_id] if t1_id else None
+        logger.info(f"[{uid}] 一次拼接 videos=3 transitions={_tr}")
         concat_resp = video_edit_client.concat_videos(
             videos=[video_url, freeze_video_url, tail_url],
-            transitions=[t1_id, t2_id] if t1_id else None,
+            transitions=_tr,
         )
+        logger.info(f"[{uid}] 拼接响应: url={getattr(concat_resp, 'url', None)}")
     else:
+        logger.info(f"[{uid}] 分两次拼接 transitions1={[t1_id] if t1_id else None} transitions2={[t2_id] if t2_id else None}")
         first_resp = video_edit_client.concat_videos(
             videos=[video_url, freeze_video_url],
             transitions=[t1_id] if t1_id else None,
@@ -937,6 +1020,8 @@ def process_ad_tail_video(
     bgm_volume: float = 0.6,
     bgm_fade_in: float = 0.0,
     bgm_fade_out: float = 0.0,
+    frame_mode: str = "标准",
+    fade_seconds: float = 4.0,
 ) -> str:
     """
     处理单个视频：提取最后一帧 → 合成搜索框 → 字幕分段TTS配音 → ffmpeg生成静止定格视频（含字幕+配音） → 拼接 → 可选BGM混音。
@@ -972,6 +1057,8 @@ def process_ad_tail_video(
             bgm_volume=bgm_volume,
             bgm_fade_in=bgm_fade_in,
             bgm_fade_out=bgm_fade_out,
+            frame_mode=frame_mode,
+            fade_seconds=fade_seconds,
         )
         return json.dumps(result, ensure_ascii=False)
     except Exception as e:

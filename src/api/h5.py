@@ -357,11 +357,14 @@ async def api_params_get(request: Request):
                 "bgm_volume": _num("BGM音量"),
                 "bgm_fade_in": _num("BGM渐入"),
                 "bgm_fade_out": _num("BGM渐出"),
+                "frame_mode": field_to_text(fields.get("末帧模式")).strip(),
+                "fade_seconds": _num("渐显时长"),
             },
             "options": {
                 "tails": list(BUILTIN_TAILS.keys()),
                 "voices": list(VOICE_OPTIONS.keys()),
                 "transitions": list(TRANSITION_OPTIONS.keys()),
+                "frame_modes": ["标准", "去字幕", "黑屏渐显"],
             },
         }
 
@@ -422,11 +425,12 @@ async def api_settings_save(request: Request):
             "voice_name": "配音音色",
             "transition1": "转场1",
             "transition2": "转场2",
+            "frame_mode": "末帧模式",
         }
         for k, col in text_map.items():
             if k in s and s[k] is not None:
                 fields[col] = s[k]
-        num_map = {"bgm_volume": "BGM音量", "bgm_fade_in": "BGM渐入", "bgm_fade_out": "BGM渐出"}
+        num_map = {"bgm_volume": "BGM音量", "bgm_fade_in": "BGM渐入", "bgm_fade_out": "BGM渐出", "fade_seconds": "渐显时长"}
         for k, col in num_map.items():
             if k in s and s[k] is not None and s[k] != "":
                 try:

@@ -97,8 +97,11 @@ body.dragging { user-select: none; -webkit-user-select: none; }
 .muted { color: var(--muted); font-size: 12px; }
 /* 编辑器 */
 #view-editor { display: flex; gap: 14px; align-items: flex-start; }
-#stage-wrap { flex: none; background: var(--stage-bg); border-radius: 12px; padding: 14px; display: flex; align-items: center; justify-content: center; }
-#panel { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+#stage-wrap { flex: none; background: var(--stage-bg); border-radius: 12px; padding: 14px; display: flex; align-items: center; justify-content: center; position: sticky; top: 12px; }
+#panel { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 86px); overflow: auto; }
+#settings-panel { flex: none; width: 286px; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 86px); overflow: auto; }
+#settings-panel .props { gap: 9px; }
+#settings-panel .ptitle { font-weight: 600; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .chip {
   font-size: 12px; padding: 5px 11px; border-radius: 9px; background: var(--card);
@@ -136,9 +139,14 @@ input[type="color"] { width: 26px; height: 26px; border: none; background: none;
 .assets .a img { width: 100%; height: 64px; object-fit: contain; }
 .assets .a div { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 18px; border-radius: 99px; font-size: 13px; display: none; z-index: 99; }
-@media (max-width: 760px) {
+/* 窄屏 PC：设置栏更窄；更窄时整体堆叠 */
+@media (max-width: 1100px) { #settings-panel { width: 240px; } }
+@media (max-width: 920px) {
   #view-editor { flex-direction: column; }
-  #stage-wrap { width: 100%; }
+  #stage-wrap { position: static; width: 100%; }
+  #panel, #settings-panel { width: 100%; max-height: none; overflow: visible; }
+}
+@media (max-width: 760px) {
   header { padding: 8px 10px; }
   main { padding: 10px; }
 }
@@ -185,6 +193,7 @@ input[type="color"] { width: 26px; height: 26px; border: none; background: none;
     </div>
     <div id="status"></div>
   </aside>
+  <aside id="settings-panel"></aside>
 </main>
 
 <div id="modal-bg"><div id="modal"></div></div>
@@ -412,6 +421,7 @@ async function openEditor(recordId) {
     $('fileinfo').textContent = `${params.record.name} · ${frame.width}×${frame.height}`;
     S.savedSnapshot = snapDoc();
     buildStage();
+    renderVideoSettings();
   } catch (e) {
     $('props').innerHTML = `<span class="muted">加载失败：${e.message}</span>`;
   }
@@ -448,6 +458,19 @@ function setCenter(node, cx, cy) {
   node.x(cx - ((w / 2) * Math.cos(rad) - (h / 2) * Math.sin(rad)));
   node.y(cy - ((w / 2) * Math.sin(rad) + (h / 2) * Math.cos(rad)));
 }
+// 旋转手柄定位到选框正下方（随旋转一起转）
+function updateRotHandle() {
+  if (!S.rotHandle) return;
+  const node = S.nodes.get(S.selId);
+  if (!node) { S.rotHandle.visible(false); if (S.layerK) S.layerK.batchDraw(); return; }
+  const C = getCenter(node);
+  const rad = (node.rotation() || 0) * Math.PI / 180;
+  const d = (node.height() * node.scaleY()) / 2 + 26;
+  S.rotHandle.position({ x: C.x - d * Math.sin(rad), y: C.y + d * Math.cos(rad) });
+  S.rotHandle.visible(true);
+  S.rotHandle.moveToTop();
+  S.layerK.batchDraw();
+}
 
 async function buildStage() {
   if (S.stage) { S.stage.destroy(); S.stage = null; }
@@ -463,11 +486,32 @@ async function buildStage() {
     S.layerK.add(new Konva.Image({ image: bg, width: W, height: H, listening: false }));
   } catch (e) { toast('帧图片加载失败'); }
   S.tr = new Konva.Transformer({
-    rotateEnabled: true, keepRatio: true, enabledAnchors: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
-    rotationSnaps: [0, 90, 180, 270], rotationSnapTolerance: 7,
+    rotateEnabled: false, keepRatio: true, enabledAnchors: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
     anchorFill: '#06C755', anchorStroke: '#06C755', borderStroke: '#06C755', anchorSize: 9,
   });
   S.layerK.add(S.tr);
+  S.tr.on('transform', updateRotHandle);
+  // 剪映式旋转手柄：选框正下方的小圆钮
+  S.rotHandle = new Konva.Group({ draggable: true, visible: false });
+  S.rotHandle.add(new Konva.Circle({ radius: 11, fill: '#06C755', stroke: '#fff', strokeWidth: 2 }));
+  S.rotHandle.add(new Konva.Text({ text: '↻', fontSize: 14, fontStyle: 'bold', fill: '#fff', x: -5, y: -8 }));
+  let rotCenter = null;
+  S.rotHandle.on('dragstart', () => { const n = S.nodes.get(S.selId); if (n) rotCenter = getCenter(n); });
+  S.rotHandle.on('dragmove', () => {
+    const n = S.nodes.get(S.selId); if (!n || !rotCenter) return;
+    let deg = Math.atan2(-(S.rotHandle.x() - rotCenter.x), (S.rotHandle.y() - rotCenter.y)) * 180 / Math.PI;
+    const snapped = Math.round(deg / 90) * 90;
+    if (Math.abs(deg - snapped) < 7) deg = snapped;
+    n.rotation(deg); setCenter(n, rotCenter.x, rotCenter.y);
+    if (S.tr) S.tr.forceUpdate();
+    S.layerK.batchDraw();
+  });
+  S.rotHandle.on('dragend', () => {
+    const n = S.nodes.get(S.selId), l = S.doc.layers.find(x => lid(x) === S.selId);
+    if (n && l) syncBack(l, n);
+    updateRotHandle();
+  });
+  S.layerK.add(S.rotHandle);
   S.guideV = new Konva.Line({ points: [W / 2, 0, W / 2, H], stroke: '#06C755', strokeWidth: 1, dash: [5, 4], visible: false, listening: false });
   S.guideH = new Konva.Line({ points: [0, H / 2, W, H / 2], stroke: '#06C755', strokeWidth: 1, dash: [5, 4], visible: false, listening: false });
   S.layerK.add(S.guideV); S.layerK.add(S.guideH);
@@ -559,6 +603,7 @@ function snapToCenter(node) {
   if (sv) S.guideV.moveToTop();
   if (sh) S.guideH.moveToTop();
   if (S.tr) S.tr.moveToTop();
+  updateRotHandle();
   S.layerK.batchDraw();
 }
 function hideGuides() {
@@ -602,26 +647,51 @@ function syncBack(layer, node) {
   layer.x = +(c.x / W).toFixed(4);
   layer.y = +(c.y / H).toFixed(4);
   layer.rotation = Math.round(node.rotation() || 0);
-  renderProps();
+  renderProps(); updateRotHandle();
 }
 
+const PREVIEW_PERIOD = 4;  // 入场/出场预览循环周期（秒）
 function startAnim() {
   S.anim = new Konva.Animation(frame => {
-    const t = frame.time / 1000;
+    const T = frame.time / 1000, tt = T % PREVIEW_PERIOD;
+    const W = S.stage.width(), H = S.stage.height();
     for (const layer of S.doc.layers) {
-      if (layer.type !== 'image' || !layer.animation || !layer.animation.type) continue;
       const node = S.nodes.get(lid(layer));
       if (!node) continue;
-      const a = layer.animation, W = S.stage.width(), H = S.stage.height();
+      const ent = layer.entrance || {}, ext = layer.exit || {}, loop = layer.animation || {};
       const base = layer.opacity ?? 1;
-      if (a.type === 'shake') node.offsetX(-Math.sin(2 * Math.PI * (a.speed || 1) * t) * W * (a.amplitude || 0.012));
-      else node.offsetX(0);
-      if (a.type === 'float') node.offsetY(-Math.sin(2 * Math.PI * (a.speed || 0.8) * t) * H * (a.amplitude || 0.018));
-      else if (a.type !== 'shake') node.offsetY(0);
-      if (a.type === 'blink') {
-        const period = 1 / (a.speed || 1.1);
-        node.opacity((t % period) < period * 0.6 ? base : base * 0.2);
-      } else node.opacity(base);
+      if (!ent.type && !ext.type && !loop.type) {
+        node.offsetX(0); node.offsetY(0); node.scaleX(1); node.scaleY(1); node.opacity(base);
+        continue;
+      }
+      let op = base, ox = 0, oy = 0, sx = 1;
+      const slide = (dir, amt) => {
+        const m = (dir === 'left' || dir === 'right') ? W * 0.28 : H * 0.28;
+        const s = (dir === 'left' || dir === 'up') ? -1 : 1;
+        if (dir === 'left' || dir === 'right') ox += s * m * amt; else oy += s * m * amt;
+      };
+      if (ent.type) {
+        const de = ent.duration || 0.5, k = Math.min(1, tt / de);
+        if (ent.type === 'fade') op = base * k;
+        else if (ent.type === 'zoom') sx = 0.3 + 0.7 * k;
+        else if (ent.type === 'slide') slide(ent.dir || 'down', 1 - k);
+      }
+      if (ext.type) {
+        const dd = ext.duration || 0.5, ke = Math.max(0, (tt - (PREVIEW_PERIOD - dd)) / dd);
+        if (ke > 0) {
+          if (ext.type === 'fade') op = base * (1 - ke);
+          else if (ext.type === 'zoom') sx = 1 - 0.7 * ke;
+          else if (ext.type === 'slide') slide(ext.dir || 'up', ke);
+        }
+      }
+      if (loop.type === 'shake') ox += -Math.sin(2 * Math.PI * (loop.speed || 1) * T) * W * (loop.amplitude || 0.012);
+      if (loop.type === 'float') oy += -Math.sin(2 * Math.PI * (loop.speed || 0.8) * T) * H * (loop.amplitude || 0.018);
+      if (loop.type === 'blink') { const per = 1 / (loop.speed || 1.1); op = (T % per) < per * 0.6 ? base : base * 0.2; }
+      node.opacity(op);
+      node.scaleX(sx); node.scaleY(sx);
+      const inv = sx ? 1 / sx : 1;  // offset 是局部坐标(随 scale 缩放)：缩放居中补偿 + 位移折算
+      node.offsetX((node.width() / 2) * (1 - inv) - ox * inv);
+      node.offsetY((node.height() / 2) * (1 - inv) - oy * inv);
     }
   }, S.layerK);
   S.anim.start();
@@ -633,6 +703,7 @@ function restackNodes() {
   let z = 1;
   S.doc.layers.forEach(l => { const n = S.nodes.get(lid(l)); if (n) n.zIndex(z++); });
   if (S.tr) S.tr.moveToTop();
+  if (S.rotHandle && S.rotHandle.visible()) S.rotHandle.moveToTop();
   S.layerK.batchDraw();
 }
 
@@ -712,7 +783,7 @@ function select(id) {
   const node = S.nodes.get(id);
   // 图片/搜索框/文字均显示变换框；文字拖角缩放映射为字号（见 syncBack）
   if (S.tr) S.tr.nodes(node ? [node] : []);
-  renderChips(); renderProps();
+  renderChips(); renderProps(); updateRotHandle();
 }
 
 function row(html) { const d = document.createElement('div'); d.className = 'row'; d.innerHTML = html; return d; }
@@ -770,8 +841,65 @@ function rotationRow(layer) {
   return sliderRow('旋转', -180, 180, 1, layer.rotation ?? 0, v => v + '°', v => {
     layer.rotation = v;
     const n = S.nodes.get(lid(layer));
-    if (n) { const c = getCenter(n); n.rotation(v); setCenter(n, c.x, c.y); if (S.tr) S.tr.forceUpdate(); S.layerK.batchDraw(); }
+    if (n) { const c = getCenter(n); n.rotation(v); setCenter(n, c.x, c.y); if (S.tr) S.tr.forceUpdate(); updateRotHandle(); S.layerK.batchDraw(); }
   });
+}
+
+function appendEnterExit(p, layer, key, label, typeNames, defDir) {
+  const cur = layer[key] || {};
+  const r = row(`<label>${label}</label>`);
+  const sel = document.createElement('select'); sel.style.flex = '1';
+  Object.entries(typeNames).forEach(([v, t]) => {
+    const o = document.createElement('option'); o.value = v; o.textContent = t;
+    if ((cur.type || '') === v) o.selected = true; sel.appendChild(o);
+  });
+  sel.onchange = () => {
+    layer[key] = sel.value ? { type: sel.value, duration: cur.duration ?? 0.5, dir: cur.dir || defDir } : null;
+    renderProps();
+  };
+  r.appendChild(sel); p.appendChild(r);
+  if (cur.type === 'slide') {
+    const dr = row('<label>方向</label>'); const ds = document.createElement('select'); ds.style.flex = '1';
+    [['up', '上'], ['down', '下'], ['left', '左'], ['right', '右']].forEach(([v, t]) => {
+      const o = document.createElement('option'); o.value = v; o.textContent = t;
+      if ((cur.dir || defDir) === v) o.selected = true; ds.appendChild(o);
+    });
+    ds.onchange = () => { layer[key].dir = ds.value; };
+    dr.appendChild(ds); p.appendChild(dr);
+  }
+  if (cur.type) {
+    p.appendChild(sliderRow('时长', 0.1, 3, 0.1, cur.duration ?? 0.5, v => v + 's', v => { layer[key].duration = v; }));
+  }
+}
+
+function appendLoop(p, layer) {
+  const animSel = row('<label>循环动画</label>');
+  const sel = document.createElement('select'); sel.style.flex = '1';
+  [['', '无'], ['shake', '抖动'], ['float', '上下浮动'], ['blink', '闪烁']].forEach(([v, t]) => {
+    const o = document.createElement('option'); o.value = v; o.textContent = t;
+    if ((layer.animation?.type || '') === v) o.selected = true; sel.appendChild(o);
+  });
+  sel.onchange = () => { layer.animation = sel.value ? { type: sel.value } : null; renderProps(); };
+  animSel.appendChild(sel); p.appendChild(animSel);
+  const at = layer.animation?.type;
+  if (at === 'shake' || at === 'float') {
+    const isShake = at === 'shake';
+    p.appendChild(sliderRow('幅度', 0.004, 0.06, 0.002, layer.animation.amplitude ?? (isShake ? 0.012 : 0.018),
+      v => (v * 100).toFixed(1) + '%', v => layer.animation.amplitude = v));
+    p.appendChild(sliderRow('速度', isShake ? 0.1 : 0.3, isShake ? 16 : 3, 0.1,
+      layer.animation.speed ?? (isShake ? 1 : 0.8), v => v + 'Hz', v => layer.animation.speed = v));
+  } else if (at === 'blink') {
+    p.appendChild(sliderRow('速度', 0.3, 5, 0.1, layer.animation.speed ?? 1.1, v => v + 'Hz', v => layer.animation.speed = v));
+  }
+}
+
+function appendAnimControls(p, layer) {
+  const sub = document.createElement('div'); sub.className = 'subcard';
+  sub.innerHTML = '<span class="tt">动画</span>';
+  p.appendChild(sub);
+  appendEnterExit(sub, layer, 'entrance', '入场', { '': '无', 'fade': '渐显', 'slide': '滑入', 'zoom': '放大' }, 'down');
+  appendEnterExit(sub, layer, 'exit', '出场', { '': '无', 'fade': '渐隐', 'slide': '滑出', 'zoom': '缩小' }, 'up');
+  appendLoop(sub, layer);
 }
 
 function refreshTextNode(layer) {
@@ -817,7 +945,8 @@ function renderProps() {
     }));
     p.appendChild(opacityRow(layer));
     p.appendChild(rotationRow(layer));
-    p.appendChild(row('<span class="muted">画布拖拽移动、角点缩放、顶部手柄旋转</span>'));
+    appendAnimControls(p, layer);
+    p.appendChild(row('<span class="muted">画布拖拽移动、角点缩放、下方按钮旋转</span>'));
     return;
   }
 
@@ -829,25 +958,7 @@ function renderProps() {
     }));
     p.appendChild(opacityRow(layer));
     p.appendChild(rotationRow(layer));
-    const animSel = row('<label>动画</label>');
-    const sel = document.createElement('select');
-    [['', '无'], ['shake', '抖动'], ['float', '上下浮动'], ['blink', '闪烁']].forEach(([v, t]) => {
-      const o = document.createElement('option'); o.value = v; o.textContent = t;
-      if ((layer.animation?.type || '') === v) o.selected = true;
-      sel.appendChild(o);
-    });
-    sel.onchange = () => { layer.animation = sel.value ? { type: sel.value } : null; renderProps(); };
-    animSel.appendChild(sel); p.appendChild(animSel);
-    const at = layer.animation?.type;
-    if (at === 'shake' || at === 'float') {
-      const isShake = at === 'shake';
-      p.appendChild(sliderRow('幅度', 0.004, 0.06, 0.002, layer.animation.amplitude ?? (isShake ? 0.012 : 0.018),
-        v => (v * 100).toFixed(1) + '%', v => layer.animation.amplitude = v));
-      p.appendChild(sliderRow('速度', isShake ? 0.1 : 0.3, isShake ? 16 : 3, 0.1,
-        layer.animation.speed ?? (isShake ? 1 : 0.8), v => v + 'Hz', v => layer.animation.speed = v));
-    } else if (at === 'blink') {
-      p.appendChild(sliderRow('速度', 0.3, 5, 0.1, layer.animation.speed ?? 1.1, v => v + 'Hz', v => layer.animation.speed = v));
-    }
+    appendAnimControls(p, layer);
     p.appendChild(timingRow(layer));
     return;
   }
@@ -925,7 +1036,7 @@ function renderProps() {
   }));
   p.appendChild(sh);
 
-  if (layer.type !== 'guide_subtitle') p.appendChild(timingRow(layer));
+  if (layer.type !== 'guide_subtitle') { appendAnimControls(p, layer); p.appendChild(timingRow(layer)); }
 }
 
 function timingRow(layer) {
@@ -1007,12 +1118,33 @@ function selOf(options, value, includeCustom) {
   opts.forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; if (o === value) op.selected = true; sel.appendChild(op); });
   return sel;
 }
-$('btnSettings').onclick = () => {
-  if (!S.recordId) return;
+$('btnSettings').onclick = () => { $('settings-panel').scrollIntoView({ behavior: 'smooth' }); };
+function renderVideoSettings() {
+  const panel = $('settings-panel');
+  if (!panel) return;
+  if (!S.recordId) { panel.innerHTML = ''; return; }
   const s = S.settings || {}, o = S.options || {};
-  openModal('<span class="tt">视频设置</span><div id="setBody" style="display:flex;flex-direction:column;gap:9px"></div><div class="row"><button class="primary" id="btnSetSave">保存设置</button><button id="btnCloseModal">关闭</button></div>');
-  $('btnCloseModal').onclick = closeModal;
+  panel.innerHTML = '<div class="props"><span class="ptitle">⚙ 视频设置</span><div id="setBody" style="display:flex;flex-direction:column;gap:9px"></div><div class="row"><button class="primary" id="btnSetSave">保存设置</button></div></div>';
   const body = $('setBody');
+  // 末帧模式 + 渐显时长
+  const modes = o.frame_modes || ['标准', '去字幕', '黑屏渐显'];
+  const modeRow = row('<label>末帧模式</label>');
+  const modeSel = selOf(modes, s.frame_mode || '标准');
+  modeRow.appendChild(modeSel); body.appendChild(modeRow);
+  const modeNote = row('<span class="muted"></span>');
+  body.appendChild(modeNote);
+  let fadeSec = s.fade_seconds != null ? s.fade_seconds : 4;
+  const fadeRow = sliderRow('渐显时长', 2, 8, 0.5, fadeSec, v => v + 's', v => fadeSec = v);
+  body.appendChild(fadeRow);
+  const syncMode = () => {
+    const m = modeSel.value;
+    modeNote.querySelector('span').textContent =
+      m === '标准' ? '末尾无字幕、非黑屏：直接用最后一帧' :
+      m === '去字幕' ? '末尾有字幕：AI 去除后做中间帧' :
+      '末尾渐隐黑屏：无中间帧无配音，末段渐显图层';
+    fadeRow.style.display = m === '黑屏渐显' ? '' : 'none';
+  };
+  modeSel.onchange = syncMode; syncMode();
   // 广告尾帧（+自定义URL）
   const isCustomTail = s.tail_name === '自定义' || (!!s.tail_custom_url && !(o.tails || []).includes(s.tail_name));
   const tailRow = row('<label>广告尾帧</label>');
@@ -1046,6 +1178,8 @@ $('btnSettings').onclick = () => {
   bgmCard.appendChild(sliderRow('渐出', 0, 5, 0.5, fout, v => v + 's', v => fout = v));
   $('btnSetSave').onclick = async () => {
     const settings = {
+      frame_mode: modeSel.value,
+      fade_seconds: fadeSec,
       tail_name: tailSel.value,
       tail_custom_url: tailSel.value === '自定义' ? tailUrl.value.trim() : '',
       voice_name: voiceSel.value,
@@ -1055,10 +1189,10 @@ $('btnSettings').onclick = () => {
     try {
       await api('/api/v1/h5/settings/save', { record_id: S.recordId, settings });
       S.settings = { ...S.settings, ...settings };
-      toast('视频设置已保存'); closeModal();
+      toast('视频设置已保存');
     } catch (e) { toast('保存失败：' + e.message); }
   };
-};
+}
 $('fileBgm').onchange = async e => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f || !S.recordId) return;

@@ -17,6 +17,8 @@
 文字样式：color(#RRGGBB)、stroke{color,width}、shadow{color,opacity,blur}
 不透明度 opacity：0~1，作用于图片与文字整体（默认 1=不透明）；可重命名 name 字段
 旋转 rotation：角度（度，顺时针为正），绕图层中心旋转，适用于图片/文字/搜索框
+入场 entrance / 出场 exit：{"type": "fade"|"slide"|"zoom"(+方向), "duration": 秒}，在图层所在片段的开头/结尾播放
+循环 animation（旧名"动画"，仅 UI 改名）：{"type": "shake"|"float"|"blink", ...}，全程循环
 显示时机 timing："full"=全程显示，{"segment": N}=跟随引导语第 N 段（从 0 计）
 动画 animation：{"type": "shake"|"float"|"blink", "amplitude":..., "speed":...}
 """

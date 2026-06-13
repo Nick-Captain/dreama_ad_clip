@@ -292,6 +292,8 @@ def batch_process_from_bitable(
                             return 0.0
                     _bgm_fade_in = _num("BGM渐入")
                     _bgm_fade_out = _num("BGM渐出")
+                    _frame_mode = field_to_text(fields.get("末帧模式")).strip() or "标准"
+                    _fade_seconds = _num("渐显时长") or 4.0
 
                     # 图层样式：记录级「样式参数」> 全局默认 > 内置默认
                     _layer_doc = resolve_layer_doc(
@@ -314,6 +316,8 @@ def batch_process_from_bitable(
                         bgm_volume=_bgm_volume,
                         bgm_fade_in=_bgm_fade_in,
                         bgm_fade_out=_bgm_fade_out,
+                        frame_mode=_frame_mode,
+                        fade_seconds=_fade_seconds,
                         style_layers=_layer_doc,
                         layer_context=_layer_ctx,
                     )

@@ -84,17 +84,19 @@ def _resolve_video_source(fields: dict) -> tuple:
 def _record_summary(item: dict) -> dict:
     from tools.bitable_tool import field_to_text
     fields = item.get("fields", {})
-    name = ""
-    for att_name in ("视频附件", "附件"):
-        value = fields.get(att_name)
-        if isinstance(value, list) and value and isinstance(value[0], dict):
-            name = value[0].get("name", "")
-            break
+    name = field_to_text(fields.get("视频名")).strip()
+    if not name:
+        for att_name in ("视频附件", "附件"):
+            value = fields.get(att_name)
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                name = value[0].get("name", "")
+                break
     if not name:
         raw_url = field_to_text(fields.get("视频URL")).strip()
         if raw_url:
             name = os.path.basename(urlparse(raw_url).path) or raw_url[:40]
     output = field_to_text(fields.get("输出视频URL")).strip()
+    created = fields.get("创作日期")
     return {
         "record_id": item.get("record_id"),
         "name": name or "(未命名素材)",
@@ -103,9 +105,58 @@ def _record_summary(item: dict) -> dict:
         "status": field_to_text(fields.get("处理状态")).strip(),
         "output_video_url": output,
         "preview_url": field_to_text(fields.get("预览图URL")).strip(),
+        "thumbnail_url": field_to_text(fields.get("缩略图URL")).strip(),
+        "created_at": created if isinstance(created, (int, float)) else None,
         "error": field_to_text(fields.get("错误信息")).strip(),
         "has_style": bool(field_to_text(fields.get("样式参数")).strip()),
     }
+
+
+# ------------------------------------------------------------
+# 写回辅助：优先填第一个空白行 + 自动创作日期
+# ------------------------------------------------------------
+
+def _today_ms() -> int:
+    from datetime import datetime
+    return int(datetime.now().timestamp() * 1000)
+
+
+def _is_blank_row(fields: dict) -> bool:
+    """空白行判定：无视频源、无名字、无状态、无产出，视为可复用空行。"""
+    from tools.bitable_tool import field_to_text
+    if field_to_text(fields.get("视频URL")).strip():
+        return False
+    for att in ("视频附件", "附件", "搜索框图片", "BGM"):
+        if fields.get(att):
+            return False
+    for col in ("视频名", "处理状态", "输出视频URL", "样式参数", "角色名", "素材URL", "自定义尾帧URL"):
+        if field_to_text(fields.get(col)).strip():
+            return False
+    return True
+
+
+def _find_first_blank_record(client, app_token: str, table_id: str) -> str:
+    page_token = None
+    while True:
+        resp = client.search_records(app_token=app_token, table_id=table_id, page_token=page_token)
+        for item in resp.get("data", {}).get("items", []):
+            if _is_blank_row(item.get("fields", {})):
+                return item.get("record_id", "")
+        if not resp.get("data", {}).get("has_more"):
+            break
+        page_token = resp.get("data", {}).get("page_token")
+    return ""
+
+
+def _write_video_record(client, app_token: str, table_id: str, fields: dict) -> str:
+    """优先写入第一个空白行，无空白行才新建；自动补「创作日期」。"""
+    fields = {**fields, "创作日期": _today_ms()}
+    blank_id = _find_first_blank_record(client, app_token, table_id)
+    if blank_id:
+        client.update_records(app_token, table_id, [{"record_id": blank_id, "fields": fields}])
+        return blank_id
+    resp = client.create_record(app_token, table_id, fields)
+    return resp.get("data", {}).get("record", {}).get("record_id", "")
 
 
 # ------------------------------------------------------------
@@ -189,6 +240,25 @@ def _quick_frame(video_url: str, cache_key: str) -> dict:
     except Exception as e:
         logger.warning(f"[h5/frame] 缓存写入失败: {e}")
     return {**result, "cached": False}
+
+
+def _kickoff_thumbnail(app_token: str, table_id: str, record_id: str, video_url: str) -> None:
+    """后台抽取视频原始最后一帧，写入「缩略图URL」（与编辑器 /frame 共用帧缓存）。"""
+    def _run():
+        try:
+            cache_key = urlparse(video_url).path or video_url
+            res = _quick_frame(video_url, cache_key)
+            thumb = res.get("frame_url", "")
+            if thumb:
+                from tools.bitable_tool import BitableClient
+                BitableClient().update_records(
+                    app_token, table_id,
+                    [{"record_id": record_id, "fields": {"缩略图URL": thumb}}],
+                )
+        except Exception as e:
+            logger.warning(f"[h5/thumbnail] 后台生成缩略图失败 record_id={record_id}: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 @router.post("/frame")
@@ -413,8 +483,12 @@ async def api_upload_video(request: Request, filename: str = "video.mp4"):
         )
         url = storage.generate_presigned_url(key=key, expire_time=2592000)
         client = BitableClient()
-        resp = client.create_record(DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID, {"视频URL": url})
-        record_id = resp.get("data", {}).get("record", {}).get("record_id", "")
+        record_id = _write_video_record(
+            client, DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID,
+            {"视频URL": url, "视频名": filename},
+        )
+        if record_id:
+            _kickoff_thumbnail(DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID, record_id, url)
         return {"success": True, "record_id": record_id, "video_url": url, "name": filename}
 
     return await asyncio.to_thread(_run)
@@ -496,8 +570,12 @@ async def api_upload_finish(request: Request):
                 pass
         url = storage.generate_presigned_url(key=key, expire_time=2592000)
         client = BitableClient()
-        resp = client.create_record(DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID, {"视频URL": url})
-        record_id = resp.get("data", {}).get("record", {}).get("record_id", "")
+        record_id = _write_video_record(
+            client, DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID,
+            {"视频URL": url, "视频名": filename},
+        )
+        if record_id:
+            _kickoff_thumbnail(DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID, record_id, url)
         return {"success": True, "record_id": record_id, "video_url": url, "name": filename}
 
     return await asyncio.to_thread(_run)
@@ -538,7 +616,9 @@ async def api_records(request: Request):
             except Exception as e:
                 logger.warning(f"[h5/records] 调整链接回填失败: {e}")
 
-        return {"records": [_record_summary(it) for it in items]}
+        records = [_record_summary(it) for it in items]
+        records.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        return {"records": records}
 
     return await asyncio.to_thread(_run)
 
@@ -553,10 +633,28 @@ async def api_process(request: Request):
         raise HTTPException(status_code=400, detail="record_id 必填")
 
     def _kickoff():
-        from tools.bitable_tool import BitableClient
-        BitableClient().update_records(
+        from tools.bitable_tool import BitableClient, field_to_text, attachment_to_download_url
+        client = BitableClient()
+        fields = _fetch_record_fields(app_token, table_id, record_id)
+        update = {"处理状态": "待处理"}
+        # 无视频URL时先从附件补URL；都为空才提示用户先上传，而非交给管线深层报错
+        if not field_to_text(fields.get("视频URL")).strip():
+            resolved = ""
+            for att in ("视频附件", "附件"):
+                if fields.get(att):
+                    try:
+                        resolved = attachment_to_download_url(client, fields.get(att))
+                    except Exception as e:
+                        logger.warning(f"[h5/process] 附件解析失败 record_id={record_id}: {e}")
+                    if resolved:
+                        break
+            if resolved:
+                update["视频URL"] = resolved
+            else:
+                raise HTTPException(status_code=400, detail="该记录没有视频源，请先上传视频后再提交处理")
+        client.update_records(
             app_token, table_id,
-            [{"record_id": record_id, "fields": {"处理状态": "待处理"}}],
+            [{"record_id": record_id, "fields": update}],
         )
 
     await asyncio.to_thread(_kickoff)
@@ -589,5 +687,99 @@ async def api_record_status(request: Request):
     def _run():
         fields = _fetch_record_fields(app_token, table_id, record_id)
         return _record_summary({"record_id": record_id, "fields": fields})
+
+    return await asyncio.to_thread(_run)
+
+
+@router.post("/record-delete")
+async def api_record_delete(request: Request):
+    """删除单条记录"""
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+    record_id = payload.get("record_id", "")
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id 必填")
+
+    def _run():
+        from tools.bitable_tool import BitableClient
+        BitableClient().delete_record(app_token, table_id, record_id)
+        return {"success": True, "record_id": record_id}
+
+    return await asyncio.to_thread(_run)
+
+
+@router.post("/thumbnail")
+async def api_thumbnail(request: Request):
+    """懒加载缩略图：已有「缩略图URL」直接返回，否则抽原始最后一帧并回写。"""
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+    record_id = payload.get("record_id", "")
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id 必填")
+
+    def _run():
+        from tools.bitable_tool import field_to_text, BitableClient
+        fields = _fetch_record_fields(app_token, table_id, record_id)
+        existing = field_to_text(fields.get("缩略图URL")).strip()
+        if existing:
+            return {"thumbnail_url": existing, "cached": True}
+        url, cache_key = _resolve_video_source(fields)
+        if not url:
+            return {"thumbnail_url": "", "cached": False}
+        res = _quick_frame(url, cache_key or url)
+        thumb = res.get("frame_url", "")
+        if thumb:
+            try:
+                BitableClient().update_records(
+                    app_token, table_id,
+                    [{"record_id": record_id, "fields": {"缩略图URL": thumb}}],
+                )
+            except Exception as e:
+                logger.warning(f"[h5/thumbnail] 回写失败 record_id={record_id}: {e}")
+        return {"thumbnail_url": thumb, "cached": False}
+
+    return await asyncio.to_thread(_run)
+
+
+# ------------------------------------------------------------
+# 命名样式库（可复用样式）
+# ------------------------------------------------------------
+
+@router.post("/styles/list")
+async def api_styles_list():
+    def _run():
+        from tools.h5_store import list_named_styles
+        return {"styles": list_named_styles()}
+    return await asyncio.to_thread(_run)
+
+
+@router.post("/styles/save")
+async def api_styles_save(request: Request):
+    payload = await _json_body(request)
+    name = payload.get("name", "")
+    layer_doc = payload.get("layer_doc")
+    if not isinstance(layer_doc, dict):
+        raise HTTPException(status_code=400, detail="layer_doc 必填")
+
+    def _run():
+        from tools.layer_model import parse_layer_doc
+        from tools.h5_store import save_named_style
+        if parse_layer_doc(json.dumps(layer_doc, ensure_ascii=False)) is None:
+            raise HTTPException(status_code=400, detail="layer_doc 不是合法的图层文档")
+        return save_named_style(name, layer_doc, payload.get("guide_text", ""))
+
+    return await asyncio.to_thread(_run)
+
+
+@router.post("/styles/delete")
+async def api_styles_delete(request: Request):
+    payload = await _json_body(request)
+    style_id = payload.get("style_id", "")
+    if not style_id:
+        raise HTTPException(status_code=400, detail="style_id 必填")
+
+    def _run():
+        from tools.h5_store import delete_named_style
+        return {"success": delete_named_style(style_id)}
 
     return await asyncio.to_thread(_run)

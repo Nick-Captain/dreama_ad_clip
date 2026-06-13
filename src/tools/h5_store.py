@@ -6,6 +6,7 @@ H5 编辑器持久化：全局默认样式（键值）与共享素材库。
 """
 
 import logging
+import uuid
 from datetime import datetime, timezone
 
 from storage.database.db import get_session
@@ -14,6 +15,7 @@ from storage.database.shared.model import H5KeyValue, H5Asset
 logger = logging.getLogger(__name__)
 
 GLOBAL_LAYERS_KEY = "global_layer_doc"
+NAMED_STYLES_KEY = "named_styles"
 
 
 def get_global_layer_doc() -> dict | None:
@@ -40,6 +42,65 @@ def set_global_layer_doc(doc: dict) -> None:
             row.value = doc
             row.updated_at = datetime.now(timezone.utc)
         session.commit()
+    finally:
+        session.close()
+
+
+def list_named_styles() -> list:
+    """已命名样式列表（最新在前）。读失败降级返回空列表。"""
+    try:
+        session = get_session()
+        try:
+            row = session.get(H5KeyValue, NAMED_STYLES_KEY)
+            styles = row.value.get("styles") if row and isinstance(row.value, dict) else None
+            return list(reversed(styles)) if isinstance(styles, list) else []
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning(f"[h5_store] 读取命名样式失败: {e}")
+        return []
+
+
+def save_named_style(name: str, layer_doc: dict, guide_text: str = "") -> dict:
+    """新增一条命名样式；同名则覆盖。返回该样式条目。"""
+    name = (name or "").strip() or "未命名样式"
+    session = get_session()
+    try:
+        row = session.get(H5KeyValue, NAMED_STYLES_KEY)
+        styles = list(row.value.get("styles", [])) if row and isinstance(row.value, dict) else []
+        entry = {
+            "id": uuid.uuid4().hex[:12],
+            "name": name,
+            "layer_doc": layer_doc,
+            "guide_text": guide_text or "",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        styles = [s for s in styles if isinstance(s, dict) and s.get("name") != name]
+        styles.append(entry)
+        value = {"styles": styles}
+        if row is None:
+            session.add(H5KeyValue(key=NAMED_STYLES_KEY, value=value))
+        else:
+            row.value = value
+            row.updated_at = datetime.now(timezone.utc)
+        session.commit()
+        return entry
+    finally:
+        session.close()
+
+
+def delete_named_style(style_id: str) -> bool:
+    """按 id 删除一条命名样式。"""
+    session = get_session()
+    try:
+        row = session.get(H5KeyValue, NAMED_STYLES_KEY)
+        if row is None or not isinstance(row.value, dict):
+            return False
+        styles = [s for s in row.value.get("styles", []) if isinstance(s, dict) and s.get("id") != style_id]
+        row.value = {"styles": styles}
+        row.updated_at = datetime.now(timezone.utc)
+        session.commit()
+        return True
     finally:
         session.close()
 

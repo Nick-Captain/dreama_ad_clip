@@ -90,6 +90,10 @@ TEMPLATE_FIELDS = [
         "type": 17,  # 附件：与「视频URL」二选一，附件优先级低于URL
     },
     {
+        "field_name": "视频名",
+        "type": 1,  # 文本：H5 上传时写入的原始文件名，用于列表展示
+    },
+    {
         "field_name": "广告尾帧",
         "type": 3,  # 单选
         "property": {
@@ -180,6 +184,10 @@ TEMPLATE_FIELDS = [
     {
         "field_name": "预览图URL",
         "type": 1,  # 文本
+    },
+    {
+        "field_name": "缩略图URL",
+        "type": 1,  # 文本：视频原始最后一帧，H5 列表缩略图（与带样式的「预览图URL」区分）
     },
     {
         "field_name": "错误信息",
@@ -275,6 +283,10 @@ class BitableClient:
     def create_record(self, app_token: str, table_id: str, fields: dict) -> dict:
         """新增单条记录"""
         return self._request("POST", f"/bitable/v1/apps/{app_token}/tables/{table_id}/records", json_body={"fields": fields})
+
+    def delete_record(self, app_token: str, table_id: str, record_id: str) -> dict:
+        """删除单条记录"""
+        return self._request("DELETE", f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}")
 
     def update_records(self, app_token: str, table_id: str, records: list) -> dict:
         """批量更新记录"""

@@ -26,7 +26,8 @@ header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 16px; border-bottom: 1px solid var(--border); gap: 10px; flex-wrap: wrap;
 }
-.logo { display: flex; align-items: center; gap: 9px; font-weight: 600; }
+.logo { display: flex; align-items: center; gap: 9px; font-weight: 600; cursor: pointer; }
+.logo:hover { opacity: 0.82; }
 .ring { width: 22px; height: 22px; border-radius: 50%; background: #fff; border: 4px solid var(--brand); flex: none; }
 .fileinfo { font-size: 12px; color: var(--muted); background: var(--card); padding: 3px 10px; border-radius: 99px; }
 .hbtns { display: flex; gap: 8px; align-items: center; }
@@ -44,8 +45,33 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 main { padding: 14px 16px; }
 /* 首页 */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin-top: 12px; }
-.card { background: var(--card); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.grid.list { grid-template-columns: 1fr; }
+.card { background: var(--card); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; position: relative; }
+.card.editing { outline: 2px solid var(--brand); outline-offset: -2px; }
 .card .nm { font-weight: 600; word-break: break-all; }
+.card .thumb { width: 100%; aspect-ratio: 3/4; max-height: 180px; object-fit: contain; background: var(--stage-bg); border-radius: 8px; }
+.card .thumb.ph { display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--muted); }
+.card .meta { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.card .editing-tag { position: absolute; top: 8px; right: 8px; background: var(--brand); color: #fff; font-size: 10px; padding: 2px 8px; border-radius: 99px; }
+.card .del { color: var(--danger); border-color: transparent; padding: 5px 9px; }
+.card .del:hover { background: var(--danger); color: #fff; }
+.card .time { font-size: 11px; color: var(--muted); }
+/* 列表视图：缩略图在左，信息在右 */
+.grid.list .card { flex-direction: row; align-items: stretch; }
+.grid.list .card .thumb { width: 96px; height: 128px; aspect-ratio: auto; flex: none; max-height: none; }
+.grid.list .card .meta { flex: 1; }
+/* 全局上传进度条 */
+#upprogress { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 80;
+  background: var(--card); border-top: 1px solid var(--border); padding: 10px 16px;
+  align-items: center; gap: 12px; box-shadow: 0 -3px 14px rgba(0,0,0,0.25); }
+#upprogress.on { display: flex; }
+#upprogress .upname { font-size: 12px; color: var(--muted); max-width: 30vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; }
+#upprogress .upbar { flex: 1; height: 8px; background: var(--bg); border-radius: 99px; overflow: hidden; }
+#upprogress .upfill { height: 100%; width: 0; background: var(--brand); border-radius: 99px; transition: width 0.2s; }
+#upprogress .uptext { font-size: 12px; font-weight: 600; flex: none; min-width: 44px; text-align: right; }
+/* 图层拖拽 */
+.chip { touch-action: none; }
+.chip.drag { opacity: 0.6; }
 .badge { font-size: 11px; padding: 2px 9px; border-radius: 99px; display: inline-block; }
 .b-wait { background: var(--yellow); color: #633806; }
 .b-run { background: var(--blue); color: #042C53; }
@@ -105,7 +131,7 @@ input[type="color"] { width: 26px; height: 26px; border: none; background: none;
 </head>
 <body>
 <header>
-  <div class="logo"><span class="ring"></span><span>中间帧编辑器</span></div>
+  <div class="logo" id="logoHome" title="返回首页"><span class="ring"></span><span>中间帧编辑器</span></div>
   <span class="fileinfo" id="fileinfo">造梦次元 · 广告尾帧工作台</span>
   <div class="hbtns">
     <span class="toggle" id="themeToggle"><span data-t="dark">深色</span><span data-t="light">浅色</span></span>
@@ -118,7 +144,9 @@ input[type="color"] { width: 26px; height: 26px; border: none; background: none;
   <div class="uploadbar">
     <button class="primary" id="btnUpload">上传视频建任务</button>
     <input type="file" id="fileVideo" accept="video/mp4,video/quicktime" style="display:none">
+    <button id="btnBackEditor" style="display:none">↩ 返回编辑器</button>
     <span class="muted" id="upmsg">支持 mp4/mov，最大 500MB（自动分片上传）</span>
+    <span class="toggle" id="viewToggle" style="margin-left:auto"><span data-v="tile">平铺</span><span data-v="list">内容</span></span>
   </div>
   <div class="grid" id="records"></div>
 </main>
@@ -134,6 +162,7 @@ input[type="color"] { width: 26px; height: 26px; border: none; background: none;
     <div class="props" id="props"></div>
     <div class="actions">
       <button id="btnRender">精确预览</button>
+      <button id="btnUseStyle">使用样式</button>
       <button id="btnSave">保存样式</button>
       <button id="btnDefault">设为默认</button>
       <button class="primary" id="btnProcess">提交处理</button>
@@ -144,6 +173,11 @@ input[type="color"] { width: 26px; height: 26px; border: none; background: none;
 
 <div id="modal-bg"><div id="modal"></div></div>
 <div id="toast"></div>
+<div id="upprogress">
+  <span class="upname" id="upname"></span>
+  <div class="upbar"><div class="upfill" id="upfill"></div></div>
+  <span class="uptext" id="uptext"></span>
+</div>
 <input type="file" id="fileImage" accept="image/*" style="display:none">
 
 <script>
@@ -155,19 +189,29 @@ const S = {
   recordId: '', frame: null, doc: null, ctx: {}, guideText: '', guideOptions: [],
   searchBoxUrl: '', nodes: new Map(), selId: '', stage: null, layerK: null,
   scale: 1, anim: null, polling: null,
+  viewMode: localStorage.getItem('h5-view') || 'tile',
 };
 
 function $(id) { return document.getElementById(id); }
+function fmtTime(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 function toast(msg) {
   const t = $('toast'); t.textContent = msg; t.style.display = 'block';
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2600);
 }
 async function api(path, body, method) {
-  const resp = await fetch(API + path, {
-    method: method || 'POST',
-    headers: body instanceof Blob ? {} : { 'Content-Type': 'application/json' },
-    body: body instanceof Blob ? body : (body ? JSON.stringify(body) : '{}'),
-  });
+  const m = method || 'POST';
+  const bodyless = m === 'GET' || m === 'HEAD';
+  const opts = { method: m };
+  if (!bodyless) {
+    if (body instanceof Blob) { opts.body = body; }
+    else { opts.headers = { 'Content-Type': 'application/json' }; opts.body = body ? JSON.stringify(body) : '{}'; }
+  }
+  const resp = await fetch(API + path, opts);
   if (!resp.ok) {
     let detail = resp.statusText;
     try { detail = (await resp.json()).detail || detail; } catch (e) {}
@@ -189,59 +233,140 @@ $('themeToggle').addEventListener('click', e => {
 setTheme(localStorage.getItem('h5-theme') || 'dark');
 
 /* ---------- 首页 ---------- */
+function applyViewMode() {
+  $('records').classList.toggle('list', S.viewMode === 'list');
+  document.querySelectorAll('#viewToggle span').forEach(s => s.classList.toggle('on', s.dataset.v === S.viewMode));
+}
+function esc(s) { return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+let _thumbQueue = [], _thumbBusy = false, _thumbGen = 0;
+function queueThumb(card, recordId, gen) { _thumbQueue.push({ card, recordId, gen }); pumpThumb(); }
+async function pumpThumb() {
+  if (_thumbBusy) return;
+  const job = _thumbQueue.shift();
+  if (!job) return;
+  _thumbBusy = true;
+  if (job.gen === _thumbGen) {
+    try {
+      const r = await api('/api/v1/h5/thumbnail', { record_id: job.recordId });
+      if (job.gen === _thumbGen && r.thumbnail_url) setThumb(job.card, r.thumbnail_url);
+      else if (job.gen === _thumbGen) { const ph = job.card.querySelector('[data-thumb]'); if (ph) ph.textContent = '无预览'; }
+    } catch (e) {}
+  }
+  _thumbBusy = false;
+  pumpThumb();
+}
+function setThumb(card, url) {
+  const ph = card.querySelector('[data-thumb]');
+  if (!ph) return;
+  const img = document.createElement('img'); img.className = 'thumb'; img.src = url;
+  ph.replaceWith(img);
+}
+
 async function showHome() {
   $('view-home').style.display = '';
   $('view-editor').style.display = 'none';
   $('fileinfo').textContent = '造梦次元 · 广告尾帧工作台';
+  $('btnBackEditor').style.display = S.recordId ? '' : 'none';
+  applyViewMode();
   history.replaceState(null, '', location.pathname);
   $('records').innerHTML = '<span class="muted">加载中…</span>';
+  _thumbQueue = []; _thumbGen++;
   try {
     const data = await api('/api/v1/h5/records', {});
     const rows = data.records || [];
     if (!rows.length) { $('records').innerHTML = '<span class="muted">暂无记录，先上传一个视频吧</span>'; return; }
     $('records').innerHTML = '';
+    const gen = _thumbGen;
     rows.forEach(r => {
-      const div = document.createElement('div'); div.className = 'card';
+      const div = document.createElement('div'); div.className = 'card' + (r.record_id === S.recordId ? ' editing' : '');
       const badge = { '待处理': 'b-wait', '处理中': 'b-run', '成功': 'b-ok', '失败': 'b-fail' }[r.status] || 'b-none';
+      const thumb = r.thumbnail_url
+        ? `<img class="thumb" src="${esc(r.thumbnail_url)}">`
+        : `<div class="thumb ph" data-thumb>生成预览中…</div>`;
       div.innerHTML = `
-        <span class="nm">${r.name}</span>
-        <span><span class="badge ${badge}">${r.status || '未处理'}</span>
-        ${r.has_style ? '<span class="badge b-none">已调样式</span>' : ''}</span>
-        <span class="muted">${r.role_name ? '角色：' + r.role_name : ''}</span>
-        <div class="row">
-          <button class="primary" data-act="edit">调整样式</button>
-          ${r.output_video_url ? `<button data-act="out">查看成片</button>` : ''}
+        ${r.record_id === S.recordId ? '<span class="editing-tag">编辑中</span>' : ''}
+        ${thumb}
+        <div class="meta">
+          <span class="nm">${esc(r.name)}</span>
+          <span><span class="badge ${badge}">${r.status || '未处理'}</span>
+          ${r.has_style ? '<span class="badge b-none">已调样式</span>' : ''}</span>
+          ${r.role_name ? `<span class="muted">角色：${esc(r.role_name)}</span>` : ''}
+          ${r.created_at ? `<span class="time">创建：${fmtTime(r.created_at)}</span>` : ''}
+          <div class="row">
+            <button class="primary" data-act="edit">调整样式</button>
+            ${r.output_video_url ? `<button data-act="out">查看成片</button>` : ''}
+            <button class="del" data-act="del">删除</button>
+          </div>
         </div>`;
       div.querySelector('[data-act="edit"]').onclick = () => openEditor(r.record_id);
       const ob = div.querySelector('[data-act="out"]');
       if (ob) ob.onclick = () => window.open(r.output_video_url, '_blank');
+      div.querySelector('[data-act="del"]').onclick = () => deleteRecord(r, div);
       $('records').appendChild(div);
+      if (!r.thumbnail_url) queueThumb(div, r.record_id, gen);
     });
-  } catch (e) { $('records').innerHTML = `<span class="muted">加载失败：${e.message}</span>`; }
+  } catch (e) { $('records').innerHTML = `<span class="muted">加载失败：${esc(e.message)}</span>`; }
 }
+
+async function deleteRecord(r, card) {
+  if (!confirm(`确定删除「${r.name}」？该操作不可恢复。`)) return;
+  try {
+    await api('/api/v1/h5/record-delete', { record_id: r.record_id });
+    card.remove();
+    if (r.record_id === S.recordId) { S.recordId = ''; $('btnBackEditor').style.display = 'none'; }
+    toast('已删除');
+    if (!$('records').querySelector('.card')) $('records').innerHTML = '<span class="muted">暂无记录，先上传一个视频吧</span>';
+  } catch (e) { toast('删除失败：' + e.message); }
+}
+
+/* ---------- 全局上传进度 ---------- */
+function upProgress(pct, name, text) {
+  $('upprogress').classList.add('on');
+  $('upfill').style.width = (pct || 0) + '%';
+  $('upname').textContent = name || '';
+  $('uptext').textContent = text != null ? text : (pct != null ? pct + '%' : '');
+}
+function upDone(msg) { $('uptext').textContent = msg || ''; setTimeout(() => $('upprogress').classList.remove('on'), 1800); }
 
 /* ---------- 分片上传 ---------- */
 async function uploadVideo(file) {
-  const msg = $('upmsg');
   try {
-    msg.textContent = '初始化上传…';
+    upProgress(0, file.name, '初始化…');
     const init = await api('/api/v1/h5/upload-video/init', {});
     const cs = init.chunk_size;
     for (let off = 0, i = 0; off < file.size; off += cs, i++) {
-      msg.textContent = `上传中 ${Math.round(Math.min(off + cs, file.size) / file.size * 100)}%`;
+      const pct = Math.round(Math.min(off + cs, file.size) / file.size * 100);
+      upProgress(pct, file.name, pct + '%');
       await api(`/api/v1/h5/upload-video/chunk?upload_id=${init.upload_id}&index=${i}`, file.slice(off, off + cs));
     }
-    msg.textContent = '合成记录中…';
+    upProgress(100, file.name, '合成中…');
     const fin = await api('/api/v1/h5/upload-video/finish', { upload_id: init.upload_id, filename: file.name });
-    msg.textContent = '上传完成';
+    upDone('上传完成');
     toast('上传成功，进入编辑器');
     openEditor(fin.record_id);
-  } catch (e) { msg.textContent = '上传失败：' + e.message; toast('上传失败'); }
+  } catch (e) { upDone('上传失败'); toast('上传失败：' + e.message); }
 }
 $('btnUpload').onclick = () => $('fileVideo').click();
 $('btnUploadTop').onclick = () => { $('fileVideo').click(); };
 $('fileVideo').onchange = e => { if (e.target.files[0]) uploadVideo(e.target.files[0]); e.target.value = ''; };
-$('btnHome').onclick = () => { stopPoll(); showHome(); };
+function snapDoc() { return S.doc ? JSON.stringify({ d: cleanDoc(), g: S.guideText }) : ''; }
+function isDirty() { return !!S.doc && S.savedSnapshot !== snapDoc(); }
+function leaveEditorGuard() {
+  if ($('view-editor').style.display !== 'none' && isDirty())
+    return confirm('编辑器中有未保存的样式改动，确定离开？未保存的改动不会生效。');
+  return true;
+}
+$('btnHome').onclick = () => { if (!leaveEditorGuard()) return; stopPoll(); showHome(); };
+$('logoHome').onclick = () => { if (!leaveEditorGuard()) return; stopPoll(); showHome(); };
+$('btnBackEditor').onclick = () => { if (S.recordId) openEditor(S.recordId); };
+window.addEventListener('beforeunload', e => {
+  if ($('view-editor').style.display !== 'none' && isDirty()) { e.preventDefault(); e.returnValue = ''; }
+});
+$('viewToggle').addEventListener('click', e => {
+  if (!e.target.dataset.v) return;
+  S.viewMode = e.target.dataset.v; localStorage.setItem('h5-view', S.viewMode); applyViewMode();
+});
 
 /* ---------- 编辑器 ---------- */
 async function openEditor(recordId) {
@@ -262,6 +387,7 @@ async function openEditor(recordId) {
     S.searchBoxUrl = params.search_box_url || '';
     S.frame = frame;
     $('fileinfo').textContent = `${params.record.name} · ${frame.width}×${frame.height}`;
+    S.savedSnapshot = snapDoc();
     buildStage();
   } catch (e) {
     $('props').innerHTML = `<span class="muted">加载失败：${e.message}</span>`;
@@ -340,7 +466,7 @@ async function addNode(layer) {
     if (!layer.url) return;
     try {
       const img = await loadImg(layer.url);
-      const w = W * (layer.scale ?? 0.2), h = img.height * (w / img.width);
+      const w = W * (layer.scale ?? 0.5), h = img.height * (w / img.width);
       node = new Konva.Image({ image: img, width: w, height: h,
         x: W * (layer.x ?? 0.5) - w / 2, y: H * (layer.y ?? 0.5) - h / 2, draggable: true });
     } catch (e) { return; }
@@ -403,7 +529,7 @@ function startAnim() {
       const node = S.nodes.get(lid(layer));
       if (!node) continue;
       const a = layer.animation, W = S.stage.width(), H = S.stage.height();
-      if (a.type === 'shake') node.offsetX(-Math.sin(2 * Math.PI * (a.speed || 8) * t) * W * (a.amplitude || 0.012));
+      if (a.type === 'shake') node.offsetX(-Math.sin(2 * Math.PI * (a.speed || 2) * t) * W * (a.amplitude || 0.012));
       else node.offsetX(0);
       if (a.type === 'float') node.offsetY(-Math.sin(2 * Math.PI * (a.speed || 0.8) * t) * H * (a.amplitude || 0.018));
       else if (a.type !== 'shake') node.offsetY(0);
@@ -415,10 +541,55 @@ function startAnim() {
 }
 
 /* ---------- 图层选择与属性面板 ---------- */
+function restackNodes() {
+  // 背景图固定在 index 0；图层按列表顺序自底向上叠放，Transformer 永远置顶
+  let z = 1;
+  S.doc.layers.forEach(l => { const n = S.nodes.get(lid(l)); if (n) n.zIndex(z++); });
+  if (S.tr) S.tr.moveToTop();
+  S.layerK.batchDraw();
+}
+
+function commitChipOrder() {
+  const order = [...$('chips').querySelectorAll('.chip')].map(c => c.dataset.lid);
+  S.doc.layers.sort((a, b) => order.indexOf(lid(a)) - order.indexOf(lid(b)));
+  restackNodes();
+  renderChips();
+}
+
+function attachChipDrag(chip) {
+  chip.addEventListener('pointerdown', e => {
+    if (e.target.classList.contains('eye')) return;
+    if (e.button) return;
+    const sx = e.clientX, sy = e.clientY;
+    let dragging = false;
+    const onMove = ev => {
+      if (!dragging && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 6) return;
+      dragging = true; chip._moved = true; chip.classList.add('drag');
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      const target = el && el.closest('.chip');
+      const cont = $('chips');
+      if (target && target !== chip && target.parentNode === cont) {
+        const chips = [...cont.querySelectorAll('.chip')];
+        if (chips.indexOf(chip) < chips.indexOf(target)) cont.insertBefore(chip, target.nextSibling);
+        else cont.insertBefore(chip, target);
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      chip.classList.remove('drag');
+      if (dragging) commitChipOrder();
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  });
+}
+
 function renderChips() {
   const c = $('chips'); c.innerHTML = '';
   S.doc.layers.forEach(l => {
     const chip = document.createElement('span');
+    chip.dataset.lid = lid(l);
     chip.className = 'chip' + (lid(l) === S.selId ? ' sel' : '') + (l.visible === false ? ' hid' : '');
     chip.innerHTML = `<span>${layerName(l)}</span><span class="eye">${l.visible === false ? '🚫' : '👁'}</span>`;
     chip.querySelector('.eye').onclick = e => {
@@ -427,7 +598,8 @@ function renderChips() {
       const n = S.nodes.get(lid(l)); if (n) n.visible(l.visible);
       renderChips();
     };
-    chip.onclick = () => select(lid(l));
+    chip.onclick = () => { if (chip._moved) { chip._moved = false; return; } select(lid(l)); };
+    attachChipDrag(chip);
     c.appendChild(chip);
   });
 }
@@ -517,7 +689,7 @@ function renderProps() {
   }
 
   if (layer.type === 'image') {
-    p.appendChild(sliderRow('大小', 0.05, 1.0, 0.01, layer.scale ?? 0.2, v => Math.round(v * 100) + '%', v => {
+    p.appendChild(sliderRow('大小', 0.05, 1.0, 0.01, layer.scale ?? 0.5, v => Math.round(v * 100) + '%', v => {
       layer.scale = v; const n = S.nodes.get(lid(layer));
       if (n) { const W = S.stage.width(); const ratio = n.height() / n.width();
         const cx = n.x() + n.width() * n.scaleX() / 2, cyp = n.y() + n.height() * n.scaleY() / 2;
@@ -537,8 +709,8 @@ function renderProps() {
       const isShake = layer.animation.type === 'shake';
       p.appendChild(sliderRow('幅度', 0.004, 0.06, 0.002, layer.animation.amplitude ?? (isShake ? 0.012 : 0.018),
         v => (v * 100).toFixed(1) + '%', v => layer.animation.amplitude = v));
-      p.appendChild(sliderRow('速度', isShake ? 2 : 0.3, isShake ? 16 : 3, isShake ? 0.5 : 0.1,
-        layer.animation.speed ?? (isShake ? 8 : 0.8), v => v + 'Hz', v => layer.animation.speed = v));
+      p.appendChild(sliderRow('速度', isShake ? 1 : 0.3, isShake ? 16 : 3, isShake ? 0.5 : 0.1,
+        layer.animation.speed ?? (isShake ? 2 : 0.8), v => v + 'Hz', v => layer.animation.speed = v));
     }
     p.appendChild(timingRow(layer));
     return;
@@ -666,7 +838,7 @@ $('fileImage').onchange = async e => {
   } catch (err) { toast('上传失败：' + err.message); }
 };
 function addImageLayer(url) {
-  const layer = { type: 'image', url, visible: true, x: 0.5, y: 0.4, scale: 0.25, animation: null, timing: 'full' };
+  const layer = { type: 'image', url, visible: true, x: 0.5, y: 0.4, scale: 0.5, animation: null, timing: 'full' };
   S.doc.layers.push(layer);
   addNode(layer).then(() => { renderChips(); select(lid(layer)); });
 }
@@ -680,16 +852,73 @@ $('modal-bg').addEventListener('click', e => { if (e.target.id === 'modal-bg') c
 function cleanDoc() {
   return { version: S.doc.version || 1, layers: S.doc.layers.map(l => { const c = { ...l }; delete c._lid; return c; }) };
 }
-async function save(asDefault) {
+async function save(asDefault, silent) {
   try {
     await api('/api/v1/h5/params/save', {
       record_id: S.recordId, layer_doc: cleanDoc(), guide_text: S.guideText, set_as_default: !!asDefault,
     });
-    toast(asDefault ? '已保存并设为全局默认' : '样式已保存');
-  } catch (e) { toast('保存失败：' + e.message); }
+    S.savedSnapshot = snapDoc();
+    if (!silent) toast(asDefault ? '已保存并设为全局默认' : '样式已保存');
+    return true;
+  } catch (e) { toast('保存失败：' + e.message); return false; }
 }
-$('btnSave').onclick = () => save(false);
 $('btnDefault').onclick = () => save(true);
+
+/* 保存样式：存到本记录，并可命名存入样式库供复用 */
+$('btnSave').onclick = () => {
+  if (!S.doc) return;
+  openModal(`<span class="tt">保存样式</span>
+    <span class="muted">样式会保存到当前这条记录。如需复用到其他视频，填个名字存入样式库。</span>
+    <div class="row"><label style="min-width:0">样式名称</label><input type="text" id="styleName" style="flex:1" placeholder="可留空（仅保存到本记录）"></div>
+    <div class="row"><button class="primary" id="btnSaveConfirm">保存</button><button id="btnCloseModal">取消</button></div>`);
+  $('btnCloseModal').onclick = closeModal;
+  $('btnSaveConfirm').onclick = async () => {
+    const name = $('styleName').value.trim();
+    const ok = await save(false, true);
+    if (!ok) return;
+    if (name) {
+      try {
+        await api('/api/v1/h5/styles/save', { name, layer_doc: cleanDoc(), guide_text: S.guideText });
+        toast('已保存到本记录并存入样式库：' + name);
+      } catch (e) { toast('本记录已存，样式库保存失败：' + e.message); }
+    } else {
+      toast('样式已保存到本记录');
+    }
+    closeModal();
+  };
+};
+
+/* 使用样式：从样式库挑一个套用到当前画布 */
+$('btnUseStyle').onclick = async () => {
+  if (!S.doc) return;
+  openModal('<span class="tt">使用已保存的样式</span><div id="styleList" style="display:flex;flex-direction:column;gap:6px">加载中…</div><div class="row"><button id="btnCloseModal">关闭</button></div>');
+  $('btnCloseModal').onclick = closeModal;
+  try {
+    const data = await api('/api/v1/h5/styles/list', {});
+    const g = $('styleList');
+    if (!data.styles || !data.styles.length) { g.innerHTML = '<span class="muted">样式库为空。在「保存样式」时填个名字即可存入。</span>'; return; }
+    g.innerHTML = '';
+    data.styles.forEach(s => {
+      const d = document.createElement('div'); d.className = 'row';
+      d.style.cssText = 'justify-content:space-between;background:var(--bg);border-radius:8px;padding:8px 10px';
+      const nm = document.createElement('span'); nm.textContent = s.name; nm.style.cssText = 'flex:1;min-width:0;word-break:break-all';
+      const use = document.createElement('button'); use.className = 'primary'; use.textContent = '应用';
+      use.onclick = () => { applyStyle(s); closeModal(); };
+      const del = document.createElement('button'); del.textContent = '删除';
+      del.onclick = async () => { try { await api('/api/v1/h5/styles/delete', { style_id: s.id }); d.remove(); toast('已删除'); if (!g.querySelector('.row')) g.innerHTML = '<span class="muted">样式库为空。</span>'; } catch (e) { toast('删除失败：' + e.message); } };
+      d.appendChild(nm); d.appendChild(use); d.appendChild(del);
+      g.appendChild(d);
+    });
+  } catch (e) { $('styleList').innerHTML = '加载失败：' + esc(e.message); }
+};
+
+function applyStyle(s) {
+  if (!s.layer_doc || !Array.isArray(s.layer_doc.layers)) { toast('样式数据异常'); return; }
+  S.doc = JSON.parse(JSON.stringify(s.layer_doc));
+  if (typeof s.guide_text === 'string' && s.guide_text) S.guideText = s.guide_text;
+  buildStage();
+  toast('已应用样式：' + s.name);
+}
 $('btnRender').onclick = async () => {
   toast('服务端渲染中…');
   try {
@@ -705,7 +934,7 @@ $('btnRender').onclick = async () => {
 };
 $('btnProcess').onclick = async () => {
   try {
-    await save(false);
+    if (!(await save(false, true))) return;
     await api('/api/v1/h5/process', { record_id: S.recordId });
     $('status').textContent = '已提交，处理中…（视频处理约需2-5分钟）';
     startPoll();

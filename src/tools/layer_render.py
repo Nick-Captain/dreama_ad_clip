@@ -129,7 +129,7 @@ def _animation_exprs(layer: dict, base_x: int, base_y: int, canvas_w: int, canva
     speed = float(anim.get("speed", 0) or 0)
     if kind == "shake":
         amp = int(canvas_w * float(anim.get("amplitude", 0.012) or 0.012))
-        freq = speed or 8.0
+        freq = speed or 2.0
         return f"{base_x}+{amp}*sin(2*PI*{freq}*t)", str(base_y), None
     if kind == "float":
         amp = int(canvas_h * float(anim.get("amplitude", 0.018) or 0.018))

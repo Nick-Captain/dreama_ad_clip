@@ -732,7 +732,8 @@ def _generate_overlays_over_video(video_local: str, plan, base_t0: float, output
     cmd += [
         "-filter_complex", ";".join(filter_parts),
         "-map", last, "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        # ultrafast：此中间产物随后会被云端 concat 再编码一遍，中间质量无关紧要，优先速度
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
         "-t", str(dur), "-shortest",
         output_path,

@@ -98,6 +98,43 @@ def _classify_material_url(url: str) -> str:
     return "unknown"
 
 
+# 汉字→拼音首字母（基于 GBK 编码区间，覆盖常用简体字，零依赖）
+_PINYIN_RANGES = [
+    (0xB0A1, 0xB0C4, "a"), (0xB0C5, 0xB2C0, "b"), (0xB2C1, 0xB4ED, "c"), (0xB4EE, 0xB6E9, "d"),
+    (0xB6EA, 0xB7A1, "e"), (0xB7A2, 0xB8C0, "f"), (0xB8C1, 0xB9FD, "g"), (0xB9FE, 0xBBF6, "h"),
+    (0xBBF7, 0xBFA5, "j"), (0xBFA6, 0xC0AB, "k"), (0xC0AC, 0xC2E7, "l"), (0xC2E8, 0xC4C2, "m"),
+    (0xC4C3, 0xC5B5, "n"), (0xC5B6, 0xC5BD, "o"), (0xC5BE, 0xC6D9, "p"), (0xC6DA, 0xC8BA, "q"),
+    (0xC8BB, 0xC8F5, "r"), (0xC8F6, 0xCBF9, "s"), (0xCBFA, 0xCDD9, "t"), (0xCDDA, 0xCEF3, "w"),
+    (0xCEF4, 0xD1B8, "x"), (0xD1B9, 0xD4D0, "y"), (0xD4D1, 0xD7F9, "z"),
+]
+
+
+def _pinyin_initial(ch: str) -> str:
+    try:
+        gbk = ch.encode("gbk")
+    except Exception:
+        return ""
+    if len(gbk) != 2:
+        return ""
+    v = gbk[0] * 256 + gbk[1]
+    for lo, hi, letter in _PINYIN_RANGES:
+        if lo <= v <= hi:
+            return letter
+    return ""
+
+
+def _ascii_name(s: str) -> str:
+    """中文→拼音首字母、英文数字保留(小写)、其余丢弃。结果仅含 a-z0-9。"""
+    out = []
+    for ch in (s or ""):
+        if ch.isascii():
+            if ch.isalnum():
+                out.append(ch.lower())
+        else:
+            out.append(_pinyin_initial(ch))
+    return "".join(out)
+
+
 def _short_tail_name(tail_name: str, tail_custom_url: str) -> str:
     """尾帧简称：派对接引尾帧→派对尾帧、短剧推广尾帧→短剧尾帧、自定义→自定义尾帧。"""
     if tail_custom_url and tail_custom_url.strip():
@@ -119,9 +156,10 @@ def _rename_output(final_url: str, video_name: str, created_ms, tail_name: str, 
             date_s = datetime.datetime.fromtimestamp(created_ms / 1000).strftime("%Y%m%d")
         else:
             date_s = datetime.datetime.now().strftime("%Y%m%d")
-        base = os.path.splitext((video_name or "").strip())[0] or "视频"
-        base = re.sub(r'[\\/:*?"<>|]+', "", base) or "视频"
-        fname = f"{date_s}-{base}-{_short_tail_name(tail_name, tail_custom_url)}.mp4"
+        # 文件名仅含英文字母/数字/横杠：中文转拼音首字母
+        base = _ascii_name(os.path.splitext((video_name or "").strip())[0]) or "video"
+        tail_part = _ascii_name(_short_tail_name(tail_name, tail_custom_url).replace("尾帧", "")) or "tail"
+        fname = f"{date_s}-{base}-{tail_part}.mp4"
         tmp = os.path.join(tempfile.gettempdir(), f"named_out_{uid}.mp4")
         _download_file(final_url, tmp)
         storage = _get_storage()

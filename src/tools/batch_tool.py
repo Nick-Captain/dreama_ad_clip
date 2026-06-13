@@ -161,34 +161,21 @@ def _rename_output(final_url: str, video_name: str, created_ms, tail_name: str, 
         base = _ascii_name(os.path.splitext((video_name or "").strip())[0]) or "video"
         tail_part = _ascii_name(_short_tail_name(tail_name, tail_custom_url).replace("尾帧", "")) or "tail"
         fname = f"{date_s}-{base}-{tail_part}.mp4"
-        # 下载文件名由 Content-Disposition 决定，绕开对象 key 里存储 SDK 强加的 _hash 后缀。
-        # fname 为纯 ASCII，直接用 filename= 即可。
-        content_disposition = f'attachment; filename="{fname}"'
+        # 注：扣子 SDK 的 S3SyncStorage.stream_upload_file 不支持 content_disposition，
+        # 故下载名只能是对象 key 的 basename = {fname}_{8位hash}.mp4（哈希去不掉）。
+        # 要彻底纯净名需走 H5 后端下载代理（另行实现）。
         tmp = os.path.join(tempfile.gettempdir(), f"named_out_{uid}.mp4")
         _download_file(final_url, tmp)
         storage = _get_storage()
         obj_key = f"ad_tail_output/{fname}"
-
-        def _upload(with_cd: bool) -> str:
-            with open(tmp, "rb") as f:
-                return storage.stream_upload_file(
-                    fileobj=f,
-                    file_name=obj_key,
-                    content_type="video/mp4",
-                    content_disposition=(content_disposition if with_cd else None),
-                )
-
-        # 先带 Content-Disposition 上传（成功则下载得纯净名）；
-        # 若存储/代理不接受该参数而报错，退回不带 CD 的普通改名（至少恢复 ASCII 规范名）。
-        try:
-            key = _upload(with_cd=True)
-            note = f"改名:带CD成功({fname})"
-            logger.info(f"[批量处理] 成片改名成功（带 Content-Disposition）: {fname}")
-        except Exception as cd_err:
-            logger.warning(f"[批量处理] 带 Content-Disposition 上传失败，退回普通改名: {cd_err}")
-            key = _upload(with_cd=False)
-            note = f"改名:退回无CD(下载名带哈希后缀)({fname})｜CD报错={str(cd_err)[:120]}"
-            logger.info(f"[批量处理] 成片改名成功（无 Content-Disposition，下载名仍带哈希后缀）: {fname}")
+        with open(tmp, "rb") as f:
+            key = storage.stream_upload_file(
+                fileobj=f,
+                file_name=obj_key,
+                content_type="video/mp4",
+            )
+        note = f"改名成功({fname})"
+        logger.info(f"[批量处理] 成片改名成功: {fname}")
         try:
             os.remove(tmp)
         except Exception:

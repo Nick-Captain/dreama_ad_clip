@@ -35,7 +35,8 @@ PUBLIC_BASE_URL = os.getenv(
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
 VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm")
 
-FRAME_CACHE_PREFIX = "frame:"
+# v2：帧尺寸改用抽出 PNG 的实际像素（修复旋转视频编码/显示尺寸不一致），旧缓存作废
+FRAME_CACHE_PREFIX = "frame:v2:"
 
 
 def _table_of(payload: dict) -> tuple:
@@ -216,6 +217,11 @@ def _quick_frame(video_url: str, cache_key: str) -> dict:
                 _extract_frame_at_time(tmp_v, back, frame_path)
                 if not _is_black_frame(frame_path):
                     break
+        # 以抽出帧的实际像素尺寸为准（带旋转元数据的视频，编码尺寸与显示尺寸宽高互换），
+        # 否则编辑器画布按编码尺寸绘制会把竖拍视频拉伸变形，且与成片渲染尺寸不一致。
+        from PIL import Image
+        with Image.open(frame_path) as _im:
+            width, height = _im.size
         frame_url = _upload_image_to_s3(frame_path, f"h5/frames/{digest}.png")
     finally:
         for p in (tmp_v, frame_path):

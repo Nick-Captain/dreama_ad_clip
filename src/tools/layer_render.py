@@ -219,6 +219,10 @@ def build_freeze_render_plan(
     - overlays:  动画/分段显示图层的 OverlaySpec 列表（z 序同图层顺序）
     """
     base = Image.open(frame_path).convert("RGBA")
+    # 抽出的帧若带旋转元数据（手机竖拍常见），ffmpeg 自动旋转后的实际像素尺寸
+    # 会与 ffprobe 探测到的编码尺寸（video_w/h）宽高互换。一律以底图实际尺寸为准，
+    # 否则全画布文字图层与 base 尺寸不一致会导致 alpha_composite「images do not match」。
+    canvas_w, canvas_h = base.size
     overlays: list = []
     overlay_idx = 0
 

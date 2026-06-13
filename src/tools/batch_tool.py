@@ -416,10 +416,7 @@ def batch_process_from_bitable(
                             note = f"提示：本条为重新处理，旧输出视频已被覆盖。旧链接备份：{old_output_url}"
                         else:
                             note = ""
-                        # 诊断信息（替代扣子运行时拿不到的日志）：每步耗时 + 改名/CD 结果
-                        debug_text = result_data.get("debug_info", "")
-                        if rename_note:
-                            debug_text = (debug_text + "\n" + rename_note) if debug_text else rename_note
+                        # 关键结果先写（这几列必定存在），保证出片成功一定能写回 URL/状态
                         client.update_records(
                             app_token=app_token,
                             table_id=table_id,
@@ -429,10 +426,26 @@ def batch_process_from_bitable(
                                     "处理状态": "成功",
                                     "输出视频URL": final_url,
                                     "错误信息": note,
-                                    "调试信息": debug_text[:2000],
                                 },
                             }],
                         )
+                        # 诊断信息（替代扣子运行时拿不到的日志）：每步耗时 + 改名/CD 结果。
+                        # 单独写、容错：若「调试信息」列未 migrate 出来，写失败也不影响主结果。
+                        debug_text = result_data.get("debug_info", "")
+                        if rename_note:
+                            debug_text = (debug_text + "\n" + rename_note) if debug_text else rename_note
+                        if debug_text:
+                            try:
+                                client.update_records(
+                                    app_token=app_token,
+                                    table_id=table_id,
+                                    records=[{
+                                        "record_id": record_id,
+                                        "fields": {"调试信息": debug_text[:2000]},
+                                    }],
+                                )
+                            except Exception as dbg_err:
+                                logger.warning(f"[批量处理] 写「调试信息」列失败（可能未 migrate），忽略: {dbg_err}")
                         logger.info(f"[批量处理] 成功: record_id={record_id}")
                         return {"record_id": record_id, "status": "success", "url": final_url}
                     else:

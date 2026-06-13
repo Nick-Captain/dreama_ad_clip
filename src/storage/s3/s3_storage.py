@@ -299,6 +299,7 @@ class S3SyncStorage:
             multipart_threshold: int = 5 * 1024 * 1024,
             max_concurrency: int = 1,
             use_threads: bool = False,
+            content_disposition: Optional[str] = None,
     ) -> str:
         """流式上传（文件对象）
         - fileobj: 任何带有 read() 方法的文件对象（如 open(..., 'rb') 返回的对象、io.BytesIO 等）
@@ -317,6 +318,10 @@ class S3SyncStorage:
             key = self._generate_object_key(original_name=file_name)
 
             extra_args = {"ContentType": content_type} if content_type else {}
+            # 下载文件名由 Content-Disposition 决定（与对象 key 里的唯一性哈希无关），
+            # 设置后浏览器下载即得纯净名，无需下载代理。
+            if content_disposition:
+                extra_args["ContentDisposition"] = content_disposition
             # 使用 boto3 的高阶方法执行多段上传（传入 TransferConfig 控制分片大小）
 
             config = TransferConfig(

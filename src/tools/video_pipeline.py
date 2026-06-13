@@ -20,6 +20,7 @@ import uuid
 import re
 import subprocess
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Tuple
 
 # Monkey-patch: TOS 预签名 URL 不支持 HEAD 请求（返回 403），
@@ -55,6 +56,12 @@ logger = logging.getLogger(__name__)
 # 互相拖慢会直接撞超时（实测两条并发即触发 120s 超时被杀）。
 # 只限制本地编码，云端调用（TTS/拼接/生图）不占名额。
 _HEAVY_FFMPEG_SEMAPHORE = threading.Semaphore(2)
+
+# 尾帧规格化结果缓存：同一尾帧+同一目标尺寸在一批里只重编码一次。
+# 键 (tail_url, w, h) → 规格化后的成片 URL（我们自有 S3，30 天预签名）。
+# 内置尾帧 URL 稳定故命中率高；自定义临时 URL 不同键不命中，至多退化为现状（无害）。
+_TAIL_NORM_CACHE: dict = {}
+_TAIL_NORM_LOCK = threading.Lock()
 
 # ============================================================
 # 内置广告尾帧库（已上传到对象存储的预签名URL）
@@ -163,21 +170,31 @@ def _upload_video_to_s3(local_path: str, remote_name: str) -> str:
     return storage.generate_presigned_url(key=key, expire_time=2592000)
 
 
-def _get_video_resolution(video_url: str) -> Tuple[int, int]:
-    """获取视频分辨率 (width, height)，先下载再用 ffprobe"""
-    tmp_v = os.path.join(tempfile.gettempdir(), f"vres_{uuid.uuid4().hex[:8]}.mp4")
-    _download_file(video_url, tmp_v)
+def _video_resolution_of_file(local_path: str) -> Tuple[int, int]:
+    """对已存在的本地视频文件用 ffprobe 读分辨率 (width, height)。"""
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
         "-show_entries", "stream=width,height",
         "-of", "csv=p=0",
-        tmp_v,
+        local_path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     w, h = result.stdout.strip().split(",")
-    os.remove(tmp_v)
     return int(w), int(h)
+
+
+def _get_video_resolution(video_url: str) -> Tuple[int, int]:
+    """获取视频分辨率 (width, height)，先下载再用 ffprobe（仅供只有 URL 的调用方）。"""
+    tmp_v = os.path.join(tempfile.gettempdir(), f"vres_{uuid.uuid4().hex[:8]}.mp4")
+    _download_file(video_url, tmp_v)
+    try:
+        return _video_resolution_of_file(tmp_v)
+    finally:
+        try:
+            os.remove(tmp_v)
+        except Exception:
+            pass
 
 
 def _get_video_duration(local_path: str) -> float:
@@ -467,24 +484,6 @@ def _split_subtitle(text: str) -> List[str]:
     return segments if segments else [cleaned]
 
 
-def _get_audio_duration(audio_url: str) -> float:
-    """获取音频时长（秒），通过下载后用 ffprobe 获取"""
-    tmp_audio = os.path.join(tempfile.gettempdir(), f"tmp_audio_{uuid.uuid4().hex[:8]}.mp3")
-    _download_file(audio_url, tmp_audio)
-
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        tmp_audio,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    duration = float(result.stdout.strip())
-    os.remove(tmp_audio)
-    return duration
-
-
 def _find_chinese_font() -> str:
     """查找可用的中文字体"""
     candidates = [
@@ -618,16 +617,26 @@ def _normalize_tail(tail_url: str, target_w: int, target_h: int, output_path: st
 
 
 def _prepare_tail_url(tail_url: str, target_w: int, target_h: int, tmp_dir: str, uid: str) -> str:
-    """规格化尾帧并上传，返回新URL；失败则返回原URL（至少不阻断出片）。"""
+    """规格化尾帧并上传，返回新URL；失败则返回原URL（至少不阻断出片）。
+    按 (tail_url, w, h) 进程级缓存：批内同尾帧只重编码一次。"""
+    cache_key = (tail_url, target_w, target_h)
+    with _TAIL_NORM_LOCK:
+        cached = _TAIL_NORM_CACHE.get(cache_key)
+    if cached:
+        logger.info(f"[{uid}] 尾帧规格化命中缓存 {target_w}x{target_h}，跳过重编码")
+        return cached
     try:
         norm = os.path.join(tmp_dir, f"tailn_{uid}.mp4")
+        # 计算不持锁：避免阻塞其它记录的缓存读取；最坏情况批首几条重复编码一次，可接受
         _normalize_tail(tail_url, target_w, target_h, norm, uid)
         url = _upload_video_to_s3(norm, f"temp/tailn_{uid}.mp4")
         try:
             os.remove(norm)
         except Exception:
             pass
-        logger.info(f"[{uid}] 尾帧已规格化为 {target_w}x{target_h} H.264/30fps")
+        with _TAIL_NORM_LOCK:
+            _TAIL_NORM_CACHE[cache_key] = url
+        logger.info(f"[{uid}] 尾帧已规格化为 {target_w}x{target_h} H.264/30fps（已缓存）")
         return url
     except Exception as e:
         logger.warning(f"[{uid}] 尾帧规格化失败，用原尾帧（转场可能不生效）: {e}")
@@ -817,7 +826,7 @@ def process_video_pipeline(
     logger.info(f"[{uid}] Step 0: 下载用户视频并检测分辨率")
     tmp_video = os.path.join(tmp_dir, f"input_{uid}.mp4")
     _download_file(video_url, tmp_video)
-    video_w, video_h = _get_video_resolution(video_url)
+    video_w, video_h = _video_resolution_of_file(tmp_video)  # 复用已下载文件，避免整片二次下载
     logger.info(f"[{uid}] 原视频分辨率: {video_w}x{video_h}")
 
     # ===== 黑屏渐显模式：无中间帧、无配音；图层逐个叠加到用户视频末段、各自动画生效 =====
@@ -904,32 +913,34 @@ def process_video_pipeline(
     subtitle_segments = _split_subtitle(subtitle_text)
     logger.info(f"[{uid}] 字幕分为 {len(subtitle_segments)} 段: {subtitle_segments}")
 
-    # Step 3: 逐段 TTS 配音
-    logger.info(f"[{uid}] Step 3: 逐段 TTS 配音")
+    # Step 3: 逐段 TTS 配音（并发：云端调用不占 ffmpeg 名额；每段只下载一次，probe 本地取时长）
+    logger.info(f"[{uid}] Step 3: 逐段 TTS 配音（并发）")
     speaker = VOICE_OPTIONS.get(voice_name, "zh_female_mizai_saturn_bigtts")
-    tts_client = TTSClient(ctx=ctx)
 
-    segment_durations = []
-    segment_audio_paths = []
-    segment_audio_urls = []
-
-    for i, seg in enumerate(subtitle_segments):
+    def _tts_one(i: int, seg: str):
+        # 每任务新建 TTSClient，避免并发共享同一实例的线程安全问题
         seg_uid = f"ad_tail_{uid}_seg{i}"
-        audio_url, audio_size = tts_client.synthesize(
+        audio_url, _ = TTSClient(ctx=ctx).synthesize(
             uid=seg_uid,
             text=seg,
             speaker=speaker,
             audio_format="mp3",
         )
-        dur = _get_audio_duration(audio_url)
-        segment_durations.append(dur)
-        segment_audio_urls.append(audio_url)
-
         local_seg = os.path.join(tmp_dir, f"tts_{uid}_seg{i}.mp3")
-        _download_file(audio_url, local_seg)
-        segment_audio_paths.append(local_seg)
-
+        _download_file(audio_url, local_seg)            # 只下载一次
+        dur = _get_video_duration(local_seg)            # probe 本地文件，避免二次下载
         logger.info(f"[{uid}] 段{i}「{seg}」TTS时长: {dur:.2f}s")
+        return i, audio_url, local_seg, dur
+
+    _tts_slots = [None] * len(subtitle_segments)
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(subtitle_segments)))) as _tp:
+        for _fut in as_completed([_tp.submit(_tts_one, i, s) for i, s in enumerate(subtitle_segments)]):
+            i, audio_url, local_seg, dur = _fut.result()
+            _tts_slots[i] = (audio_url, local_seg, dur)
+
+    segment_audio_urls = [s[0] for s in _tts_slots]
+    segment_audio_paths = [s[1] for s in _tts_slots]
+    segment_durations = [s[2] for s in _tts_slots]
 
     total_audio_duration = sum(segment_durations)
     logger.info(f"[{uid}] TTS 总时长: {total_audio_duration:.2f}s")

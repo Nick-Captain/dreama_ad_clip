@@ -702,8 +702,8 @@ function previewFrame(frame) {
     const ke = Math.max(0, dx ? (t - (S.previewDur - dx)) / dx : 0);
     if (ke > 0) { if (ext.type === 'fade') op = base * (1 - ke); else if (ext.type === 'zoom') sx = 1 - 0.7 * ke; else if (ext.type === 'slide') slide(ext.dir || 'up', ke); }
   }
-  if (loop.type === 'shake') ox += -Math.sin(2 * Math.PI * (loop.speed || 1) * t) * W * (loop.amplitude || 0.012);
-  if (loop.type === 'float') oy += -Math.sin(2 * Math.PI * (loop.speed || 0.8) * t) * H * (loop.amplitude || 0.018);
+  if (loop.type === 'shake') ox += Math.sin(2 * Math.PI * (loop.speed || 1) * t) * W * (loop.amplitude || 0.012);
+  if (loop.type === 'float') oy += Math.sin(2 * Math.PI * (loop.speed || 0.8) * t) * H * (loop.amplitude || 0.018);
   if (loop.type === 'blink') { const per = 1 / (loop.speed || 1.1); op = (t % per) < per * 0.6 ? base : base * 0.2; }
   node.opacity(op); node.scaleX(sx); node.scaleY(sx);
   const inv = sx ? 1 / sx : 1;

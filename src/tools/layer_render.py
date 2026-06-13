@@ -14,6 +14,7 @@
 import logging
 import math
 import os
+import threading
 import requests
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -44,13 +45,24 @@ class FreezeRenderPlan:
     overlays: list = field(default_factory=list)
 
 
+# 字体按 (path,size) 做线程本地缓存：单条记录内多个文字图层复用同一字体对象，
+# 省去重复的 truetype 文件加载；线程本地避免跨记录共享 FreeType 对象的并发风险。
+_FONT_TLS = threading.local()
+
+
 def _load_font(font_path: str, size: int):
-    try:
-        if font_path:
-            return ImageFont.truetype(font_path, size)
-    except Exception:
-        pass
-    return ImageFont.load_default()
+    cache = getattr(_FONT_TLS, "cache", None)
+    if cache is None:
+        cache = _FONT_TLS.cache = {}
+    key = (font_path or "", size)
+    font = cache.get(key)
+    if font is None:
+        try:
+            font = ImageFont.truetype(font_path, size) if font_path else ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        cache[key] = font
+    return font
 
 
 def _download_image(url: str) -> Image.Image:

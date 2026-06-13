@@ -160,11 +160,19 @@ def _rename_output(final_url: str, video_name: str, created_ms, tail_name: str, 
         base = _ascii_name(os.path.splitext((video_name or "").strip())[0]) or "video"
         tail_part = _ascii_name(_short_tail_name(tail_name, tail_custom_url).replace("尾帧", "")) or "tail"
         fname = f"{date_s}-{base}-{tail_part}.mp4"
+        # 下载文件名由 Content-Disposition 决定，绕开对象 key 里存储 SDK 强加的 _hash 后缀。
+        # fname 为纯 ASCII，直接用 filename= 即可。
+        content_disposition = f'attachment; filename="{fname}"'
         tmp = os.path.join(tempfile.gettempdir(), f"named_out_{uid}.mp4")
         _download_file(final_url, tmp)
         storage = _get_storage()
         with open(tmp, "rb") as f:
-            key = storage.stream_upload_file(fileobj=f, file_name=f"ad_tail_output/{fname}", content_type="video/mp4")
+            key = storage.stream_upload_file(
+                fileobj=f,
+                file_name=f"ad_tail_output/{fname}",
+                content_type="video/mp4",
+                content_disposition=content_disposition,
+            )
         try:
             os.remove(tmp)
         except Exception:

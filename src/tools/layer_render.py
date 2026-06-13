@@ -56,6 +56,21 @@ def _download_image(url: str) -> Image.Image:
     return Image.open(BytesIO(resp.content)).convert("RGBA")
 
 
+def _apply_opacity(img: Image.Image, layer: dict) -> Image.Image:
+    op = float(layer.get("opacity", 1) or 1)
+    if op < 1:
+        img.putalpha(img.getchannel("A").point(lambda a: int(a * op)))
+    return img
+
+
+def _rotate_expand(img: Image.Image, layer: dict) -> Image.Image:
+    """绕图片中心旋转并扩展画布（Konva 正角=顺时针 → PIL 取负）。"""
+    rot = float(layer.get("rotation", 0) or 0)
+    if rot:
+        img = img.rotate(-rot, expand=True, resample=Image.BICUBIC)
+    return img
+
+
 def render_text_canvas(
     canvas_w: int,
     canvas_h: int,
@@ -109,6 +124,11 @@ def render_text_canvas(
                   stroke_width=stroke_width, stroke_fill=stroke_color)
     else:
         draw.text((tx, ty), text, font=font, fill=fill_color)
+
+    rotation = float(layer.get("rotation", 0) or 0)
+    if rotation:
+        # 绕文字中心旋转（Konva 正角=顺时针，PIL 正角=逆时针，取负对齐）
+        img = img.rotate(-rotation, center=(canvas_w * x_pct, canvas_h * y_pct), resample=Image.BICUBIC)
 
     opacity = float(layer.get("opacity", 1) or 1)
     if opacity < 1:
@@ -259,9 +279,11 @@ def build_freeze_render_plan(
             target_w = max(1, int(canvas_w * float(layer.get("scale", 0.7) or 0.7)))
             target_h = max(1, int(sb.height * target_w / sb.width))
             sb = sb.resize((target_w, target_h), Image.Resampling.LANCZOS)
-            pos_x = int(canvas_w * float(layer.get("x", 0.5) or 0.5) - target_w / 2)
-            pos_y = int(canvas_h * float(layer.get("y", 0.15) or 0.15))
-            base.paste(sb, (pos_x, pos_y), sb)
+            sb = _apply_opacity(sb, layer)
+            cx = canvas_w * float(layer.get("x", 0.5) or 0.5)
+            cy = canvas_h * float(layer.get("y", 0.18) or 0.18)  # 中心定位（与图片一致）
+            sb = _rotate_expand(sb, layer)
+            base.paste(sb, (int(cx - sb.width / 2), int(cy - sb.height / 2)), sb)
             continue
 
         if ltype == "guide_subtitle":
@@ -300,11 +322,12 @@ def build_freeze_render_plan(
             target_w = max(1, int(canvas_w * float(layer.get("scale", 0.2) or 0.2)))
             target_h = max(1, int(im.height * target_w / im.width))
             im = im.resize((target_w, target_h), Image.Resampling.LANCZOS)
-            op = float(layer.get("opacity", 1) or 1)
-            if op < 1:
-                im.putalpha(im.getchannel("A").point(lambda a: int(a * op)))
-            pos_x = int(canvas_w * float(layer.get("x", 0.5) or 0.5) - target_w / 2)
-            pos_y = int(canvas_h * float(layer.get("y", 0.5) or 0.5) - target_h / 2)
+            im = _apply_opacity(im, layer)
+            im = _rotate_expand(im, layer)  # 旋转后画布扩展，按中心重新定位
+            cx = canvas_w * float(layer.get("x", 0.5) or 0.5)
+            cy = canvas_h * float(layer.get("y", 0.5) or 0.5)
+            pos_x = int(cx - im.width / 2)
+            pos_y = int(cy - im.height / 2)
             seg_enable = _segment_enable_expr(layer, bounds)
             has_anim = bool((layer.get("animation") or {}).get("type"))
             if not has_anim and seg_enable is None:

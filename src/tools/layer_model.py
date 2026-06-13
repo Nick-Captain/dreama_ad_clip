@@ -8,7 +8,7 @@
 }
 
 图层类型与坐标语义（均为相对画布的百分比，适配任意分辨率）：
-- search_box      搜索框贴图。x=水平中心(0.5=居中)，y=顶边位置，scale=宽度占比
+- search_box      搜索框贴图。x=水平中心(0.5=居中)，y=垂直中心，scale=宽度占比
 - guide_subtitle  引导语字幕。x=水平中心，y=垂直中心；文案来自记录「引导语」，
                   跟随 TTS 节奏分段显示（该行为由管线控制，图层只管样式）
 - text            普通文字（角色名/自定义）。x/y=文字中心；text_source 指定取值来源
@@ -16,6 +16,7 @@
 
 文字样式：color(#RRGGBB)、stroke{color,width}、shadow{color,opacity,blur}
 不透明度 opacity：0~1，作用于图片与文字整体（默认 1=不透明）；可重命名 name 字段
+旋转 rotation：角度（度，顺时针为正），绕图层中心旋转，适用于图片/文字/搜索框
 显示时机 timing："full"=全程显示，{"segment": N}=跟随引导语第 N 段（从 0 计）
 动画 animation：{"type": "shake"|"float"|"blink", "amplitude":..., "speed":...}
 """
@@ -39,7 +40,7 @@ BUILTIN_DEFAULT_LAYERS = {
             "type": "search_box",
             "visible": True,
             "x": 0.5,
-            "y": 0.15,
+            "y": 0.18,
             "scale": 0.70,
         },
         {

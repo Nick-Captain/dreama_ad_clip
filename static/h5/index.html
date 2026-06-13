@@ -173,6 +173,7 @@ input[type="color"] { width: 26px; height: 26px; border: none; background: none;
     <div class="chips">
       <button id="btnAddText">+ 字幕</button>
       <button id="btnAddImage">+ 图片</button>
+      <button id="btnSettings">⚙ 视频设置</button>
     </div>
     <div class="props" id="props"></div>
     <div class="actions">
@@ -190,6 +191,7 @@ input[type="color"] { width: 26px; height: 26px; border: none; background: none;
 <div id="toast"></div>
 <div id="procbanner"></div>
 <input type="file" id="fileSearchBox" accept="image/*" style="display:none">
+<input type="file" id="fileBgm" accept="audio/*" style="display:none">
 <div id="upprogress">
   <span class="upname" id="upname"></span>
   <div class="upbar"><div class="upfill" id="upfill"></div></div>
@@ -207,6 +209,7 @@ const S = {
   searchBoxUrl: '', nodes: new Map(), selId: '', stage: null, layerK: null,
   scale: 1, anim: null, polling: null,
   viewMode: localStorage.getItem('h5-view') || 'tile',
+  settings: {}, options: { tails: [], voices: [], transitions: [] },
 };
 
 function $(id) { return document.getElementById(id); }
@@ -403,6 +406,8 @@ async function openEditor(recordId) {
     S.guideText = params.guide_text || '';
     S.guideOptions = params.guide_options || [];
     S.searchBoxUrl = params.search_box_url || '';
+    S.settings = params.settings || {};
+    S.options = params.options || { tails: [], voices: [], transitions: [] };
     S.frame = frame;
     $('fileinfo').textContent = `${params.record.name} · ${frame.width}×${frame.height}`;
     S.savedSnapshot = snapDoc();
@@ -427,6 +432,23 @@ function stageSize() {
   return Math.min(maxW / S.frame.width, maxH / S.frame.height);
 }
 
+// 节点几何中心（考虑旋转；节点原点在左上、绕原点旋转）
+function getCenter(node) {
+  const w = node.width() * node.scaleX(), h = node.height() * node.scaleY();
+  const rad = (node.rotation() || 0) * Math.PI / 180;
+  return {
+    x: node.x() + (w / 2) * Math.cos(rad) - (h / 2) * Math.sin(rad),
+    y: node.y() + (w / 2) * Math.sin(rad) + (h / 2) * Math.cos(rad),
+  };
+}
+// 把节点放到使其几何中心落在 (cx,cy)（保持当前旋转/尺寸）
+function setCenter(node, cx, cy) {
+  const w = node.width() * node.scaleX(), h = node.height() * node.scaleY();
+  const rad = (node.rotation() || 0) * Math.PI / 180;
+  node.x(cx - ((w / 2) * Math.cos(rad) - (h / 2) * Math.sin(rad)));
+  node.y(cy - ((w / 2) * Math.sin(rad) + (h / 2) * Math.cos(rad)));
+}
+
 async function buildStage() {
   if (S.stage) { S.stage.destroy(); S.stage = null; }
   if (S.anim) { S.anim.stop(); S.anim = null; }
@@ -441,7 +463,8 @@ async function buildStage() {
     S.layerK.add(new Konva.Image({ image: bg, width: W, height: H, listening: false }));
   } catch (e) { toast('帧图片加载失败'); }
   S.tr = new Konva.Transformer({
-    rotateEnabled: false, keepRatio: true, enabledAnchors: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
+    rotateEnabled: true, keepRatio: true, enabledAnchors: ['top-left', 'top-right', 'bottom-left', 'bottom-right'],
+    rotationSnaps: [0, 90, 180, 270], rotationSnapTolerance: 7,
     anchorFill: '#06C755', anchorStroke: '#06C755', borderStroke: '#06C755', anchorSize: 9,
   });
   S.layerK.add(S.tr);
@@ -467,7 +490,7 @@ function defaultLayerName(l) {
 }
 function layerName(l) { return (l.name && l.name.trim()) ? l.name.trim() : defaultLayerName(l); }
 // 类型符号：文字类（字幕/引导语/角色名）= T；图片类（图片/搜索框）= ▦
-function layerIcon(l) { return (l.type === 'image' || l.type === 'search_box') ? '▦' : 'T'; }
+function layerIcon(l) { return (l.type === 'image' || l.type === 'search_box') ? '🖼' : 'T'; }
 function renameLayer(l) {
   const nv = prompt('重命名图层（留空恢复默认名）', l.name || '');
   if (nv === null) return;
@@ -483,22 +506,22 @@ function textOf(l) {
 async function addNode(layer) {
   const W = S.stage.width(), H = S.stage.height();
   const id = lid(layer);
-  let node = null;
+  let node = null, cy = layer.y ?? 0.5;
   if (layer.type === 'search_box') {
     if (!S.searchBoxUrl) return;
     try {
       const img = await loadImg(S.searchBoxUrl);
       const w = W * (layer.scale ?? 0.7), h = img.height * (w / img.width);
-      node = new Konva.Image({ image: img, width: w, height: h,
-        x: W * (layer.x ?? 0.5) - w / 2, y: H * (layer.y ?? 0.15), draggable: true });
+      node = new Konva.Image({ image: img, width: w, height: h, draggable: true });
+      cy = layer.y ?? 0.18;
     } catch (e) { return; }
   } else if (layer.type === 'image') {
     if (!layer.url) return;
     try {
       const img = await loadImg(layer.url);
       const w = W * (layer.scale ?? 0.5), h = img.height * (w / img.width);
-      node = new Konva.Image({ image: img, width: w, height: h,
-        x: W * (layer.x ?? 0.5) - w / 2, y: H * (layer.y ?? 0.5) - h / 2, draggable: true });
+      node = new Konva.Image({ image: img, width: w, height: h, draggable: true });
+      cy = layer.y ?? 0.5;
     } catch (e) { return; }
   } else {
     node = new Konva.Text({
@@ -507,9 +530,10 @@ async function addNode(layer) {
       fill: layer.color || '#FFFFFF', draggable: true, fontStyle: 'bold',
     });
     applyTextStyle(node, layer);
-    node.x(W * (layer.x ?? 0.5) - node.width() / 2);
-    node.y(H * (layer.y ?? 0.7) - node.height() / 2);
+    cy = layer.y ?? 0.7;
   }
+  node.rotation(layer.rotation || 0);
+  setCenter(node, W * (layer.x ?? 0.5), H * cy);
   node.setAttr('lid', id);
   node.visible(layer.visible !== false);
   node.opacity(layer.opacity ?? 1);
@@ -526,12 +550,14 @@ const SNAP_PX = 7;
 function snapToCenter(node) {
   if (!S.guideV) return;
   const W = S.stage.width(), H = S.stage.height();
-  const w = node.width() * node.scaleX(), h = node.height() * node.scaleY();
-  const cx = node.x() + w / 2, cy = node.y() + h / 2;
-  if (Math.abs(cx - W / 2) < SNAP_PX) { node.x(W / 2 - w / 2); S.guideV.visible(true); S.guideV.moveToTop(); }
-  else S.guideV.visible(false);
-  if (Math.abs(cy - H / 2) < SNAP_PX) { node.y(H / 2 - h / 2); S.guideH.visible(true); S.guideH.moveToTop(); }
-  else S.guideH.visible(false);
+  const c = getCenter(node);
+  let nx = c.x, ny = c.y, sv = false, sh = false;
+  if (Math.abs(c.x - W / 2) < SNAP_PX) { nx = W / 2; sv = true; }
+  if (Math.abs(c.y - H / 2) < SNAP_PX) { ny = H / 2; sh = true; }
+  if (sv || sh) setCenter(node, nx, ny);
+  S.guideV.visible(sv); S.guideH.visible(sh);
+  if (sv) S.guideV.moveToTop();
+  if (sh) S.guideH.moveToTop();
   if (S.tr) S.tr.moveToTop();
   S.layerK.batchDraw();
 }
@@ -556,30 +582,26 @@ function applyTextStyle(node, layer) {
 
 function syncBack(layer, node) {
   const W = S.stage.width(), H = S.stage.height();
-  if (layer.type === 'search_box') {
-    const w = node.width() * node.scaleX();
-    layer.scale = +(w / W).toFixed(4);
-    layer.x = +((node.x() + w / 2) / W).toFixed(4);
-    layer.y = +(node.y() / H).toFixed(4);
-  } else if (layer.type === 'image') {
-    const w = node.width() * node.scaleX(), h = node.height() * node.scaleY();
-    layer.scale = +(w / W).toFixed(4);
-    layer.x = +((node.x() + w / 2) / W).toFixed(4);
-    layer.y = +((node.y() + h / 2) / H).toFixed(4);
+  const c = getCenter(node);  // 含旋转的视觉中心，须在复位 scale 前取
+  if (layer.type === 'search_box' || layer.type === 'image') {
+    const newW = node.width() * node.scaleX(), newH = node.height() * node.scaleY();
+    node.scaleX(1); node.scaleY(1);
+    node.width(newW); node.height(newH);
+    layer.scale = +(newW / W).toFixed(4);
   } else {
-    // 文字：变换框拖角缩放 → 映射到字号（保持中心不变），再把 scale 复位
+    // 文字：拖角缩放 → 映射到字号，再复位 scale
     const sc = node.scaleX();
     if (Math.abs(sc - 1) > 0.001) {
-      const cx0 = node.x() + node.width() * sc / 2, cy0 = node.y() + node.height() * sc / 2;
       const newFont = Math.max(10, node.fontSize() * sc);
       node.scaleX(1); node.scaleY(1);
       node.fontSize(newFont);
       layer.size = +(newFont / W).toFixed(4);
-      node.x(cx0 - node.width() / 2); node.y(cy0 - node.height() / 2);
     }
-    layer.x = +((node.x() + node.width() / 2) / W).toFixed(4);
-    layer.y = +((node.y() + node.height() / 2) / H).toFixed(4);
   }
+  setCenter(node, c.x, c.y);
+  layer.x = +(c.x / W).toFixed(4);
+  layer.y = +(c.y / H).toFixed(4);
+  layer.rotation = Math.round(node.rotation() || 0);
   renderProps();
 }
 
@@ -696,26 +718,34 @@ function select(id) {
 function row(html) { const d = document.createElement('div'); d.className = 'row'; d.innerHTML = html; return d; }
 
 function colorRow(labelText, value, onPick) {
+  // 选色时不重建面板（就地刷新选中高亮），系统取色器可拖着慢慢调、色板常驻
   const d = row(`<label>${labelText}</label>`);
+  let hexEl;
+  const refresh = c => {
+    const up = (c || '').toUpperCase();
+    d.querySelectorAll('.sw').forEach(s => s.classList.toggle('sel', s.dataset.c === up));
+    if (hexEl) hexEl.value = c;
+  };
+  const pick = c => { refresh(c); onPick(c); };
   SWATCHES.forEach(c => {
     const s = document.createElement('span');
     s.className = 'sw' + (value && value.toUpperCase() === c ? ' sel' : '');
-    s.style.background = c;
-    s.onclick = () => onPick(c);
+    s.dataset.c = c; s.style.background = c;
+    s.onclick = () => pick(c);
     d.appendChild(s);
   });
   const picker = document.createElement('input'); picker.type = 'color'; picker.value = value || '#FFFFFF';
-  picker.oninput = () => onPick(picker.value.toUpperCase());
+  picker.oninput = () => pick(picker.value.toUpperCase());
   d.appendChild(picker);
-  const hex = document.createElement('input'); hex.type = 'text'; hex.className = 'hex'; hex.value = value || '';
-  hex.placeholder = '#RRGGBB 或 rgb(...)';
-  hex.onchange = () => {
-    let v = hex.value.trim();
+  hexEl = document.createElement('input'); hexEl.type = 'text'; hexEl.className = 'hex'; hexEl.value = value || '';
+  hexEl.placeholder = '#RRGGBB 或 rgb(...)';
+  hexEl.onchange = () => {
+    let v = hexEl.value.trim();
     const m = v.match(/rgba?\((\d+)[,\s]+(\d+)[,\s]+(\d+)/i);
     if (m) v = '#' + [m[1], m[2], m[3]].map(n => (+n).toString(16).padStart(2, '0')).join('');
-    if (/^#[0-9a-fA-F]{6}$/.test(v)) onPick(v.toUpperCase()); else toast('颜色格式不正确');
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) pick(v.toUpperCase()); else toast('颜色格式不正确');
   };
-  d.appendChild(hex);
+  d.appendChild(hexEl);
   return d;
 }
 
@@ -736,17 +766,22 @@ function opacityRow(layer) {
     if (n) { n.opacity(v); S.layerK.batchDraw(); }
   });
 }
+function rotationRow(layer) {
+  return sliderRow('旋转', -180, 180, 1, layer.rotation ?? 0, v => v + '°', v => {
+    layer.rotation = v;
+    const n = S.nodes.get(lid(layer));
+    if (n) { const c = getCenter(n); n.rotation(v); setCenter(n, c.x, c.y); if (S.tr) S.tr.forceUpdate(); S.layerK.batchDraw(); }
+  });
+}
 
 function refreshTextNode(layer) {
   const node = S.nodes.get(lid(layer));
   if (!node) return;
   const W = S.stage.width(), H = S.stage.height();
-  const cx = layer.x ?? 0.5, cy = layer.y ?? 0.7;
   node.text(textOf(layer));
   node.fontSize(Math.max(10, W * (layer.size ?? 0.06)));
   applyTextStyle(node, layer);
-  node.x(W * cx - node.width() / 2);
-  node.y(H * cy - node.height() / 2);
+  setCenter(node, W * (layer.x ?? 0.5), H * (layer.y ?? 0.7));
   S.layerK.batchDraw();
 }
 
@@ -777,23 +812,23 @@ function renderProps() {
     if (!S.searchBoxUrl) p.appendChild(row('<span class="muted">该记录还没有搜索框图片，点上方按钮上传（也可在表格「搜索框图片」列上传）</span>'));
     p.appendChild(sliderRow('大小', 0.2, 1.0, 0.01, layer.scale ?? 0.7, v => Math.round(v * 100) + '%', v => {
       layer.scale = v; const n = S.nodes.get(lid(layer));
-      if (n) { const W = S.stage.width(); const ratio = n.height() / n.width(); const cx = n.x() + n.width() * n.scaleX() / 2;
-        n.scaleX(1); n.scaleY(1); n.width(W * v); n.height(W * v * ratio); n.x(cx - n.width() / 2); S.layerK.batchDraw(); }
+      if (n) { const W = S.stage.width(); const ratio = n.height() / n.width(); const c = getCenter(n);
+        n.width(W * v); n.height(W * v * ratio); setCenter(n, c.x, c.y); S.layerK.batchDraw(); }
     }));
     p.appendChild(opacityRow(layer));
-    p.appendChild(row('<span class="muted">位置直接在画布拖拽，角点缩放</span>'));
+    p.appendChild(rotationRow(layer));
+    p.appendChild(row('<span class="muted">画布拖拽移动、角点缩放、顶部手柄旋转</span>'));
     return;
   }
 
   if (layer.type === 'image') {
     p.appendChild(sliderRow('大小', 0.05, 1.0, 0.01, layer.scale ?? 0.5, v => Math.round(v * 100) + '%', v => {
       layer.scale = v; const n = S.nodes.get(lid(layer));
-      if (n) { const W = S.stage.width(); const ratio = n.height() / n.width();
-        const cx = n.x() + n.width() * n.scaleX() / 2, cyp = n.y() + n.height() * n.scaleY() / 2;
-        n.scaleX(1); n.scaleY(1); n.width(W * v); n.height(W * v * ratio);
-        n.x(cx - n.width() / 2); n.y(cyp - n.height() / 2); S.layerK.batchDraw(); }
+      if (n) { const W = S.stage.width(); const ratio = n.height() / n.width(); const c = getCenter(n);
+        n.width(W * v); n.height(W * v * ratio); setCenter(n, c.x, c.y); S.layerK.batchDraw(); }
     }));
     p.appendChild(opacityRow(layer));
+    p.appendChild(rotationRow(layer));
     const animSel = row('<label>动画</label>');
     const sel = document.createElement('select');
     [['', '无'], ['shake', '抖动'], ['float', '上下浮动'], ['blink', '闪烁']].forEach(([v, t]) => {
@@ -860,13 +895,14 @@ function renderProps() {
 
   p.appendChild(sliderRow('字号', 0.02, 0.12, 0.002, layer.size ?? 0.06,
     v => (v * 100).toFixed(1) + '%', v => { layer.size = v; refreshTextNode(layer); }));
-  p.appendChild(colorRow('字色', layer.color || '#FFFFFF', c => { layer.color = c; refreshTextNode(layer); renderProps(); }));
+  p.appendChild(colorRow('字色', layer.color || '#FFFFFF', c => { layer.color = c; refreshTextNode(layer); }));
   p.appendChild(opacityRow(layer));
+  p.appendChild(rotationRow(layer));
 
   const sc = document.createElement('div'); sc.className = 'subcard';
   sc.innerHTML = '<span class="tt">描边</span>';
   sc.appendChild(colorRow('颜色', layer.stroke?.color || '#000000', c => {
-    layer.stroke = { color: c, width: layer.stroke?.width ?? 3 }; refreshTextNode(layer); renderProps();
+    layer.stroke = { color: c, width: layer.stroke?.width ?? 0 }; refreshTextNode(layer);
   }));
   sc.appendChild(sliderRow('粗细', 0, 8, 1, layer.stroke?.width ?? 0, v => v + 'px', v => {
     layer.stroke = v ? { color: layer.stroke?.color || '#000000', width: v } : null; refreshTextNode(layer);
@@ -877,8 +913,8 @@ function renderProps() {
   sh.innerHTML = '<span class="tt">阴影</span>';
   const shadow = layer.shadow || null;
   sh.appendChild(colorRow('颜色', shadow?.color || '#000000', c => {
-    layer.shadow = { color: c, opacity: shadow?.opacity ?? 0.6, blur: shadow?.blur ?? 4 };
-    refreshTextNode(layer); renderProps();
+    layer.shadow = { color: c, opacity: layer.shadow?.opacity ?? 0, blur: layer.shadow?.blur ?? 4 };
+    refreshTextNode(layer);
   }));
   sh.appendChild(sliderRow('不透明度', 0, 1, 0.05, shadow?.opacity ?? 0, v => Math.round(v * 100) + '%', v => {
     layer.shadow = v ? { color: layer.shadow?.color || '#000000', opacity: v, blur: layer.shadow?.blur ?? 4 } : null;
@@ -964,6 +1000,77 @@ async function setSearchBox(url) {
   restackNodes(); renderChips(); select(lid(sb));
 }
 
+/* ---------- 视频设置（尾帧/配音/BGM/转场） ---------- */
+function selOf(options, value, includeCustom) {
+  const sel = document.createElement('select'); sel.style.flex = '1';
+  const opts = includeCustom ? [...(options || []), '自定义'] : (options || []);
+  opts.forEach(o => { const op = document.createElement('option'); op.value = o; op.textContent = o; if (o === value) op.selected = true; sel.appendChild(op); });
+  return sel;
+}
+$('btnSettings').onclick = () => {
+  if (!S.recordId) return;
+  const s = S.settings || {}, o = S.options || {};
+  openModal('<span class="tt">视频设置</span><div id="setBody" style="display:flex;flex-direction:column;gap:9px"></div><div class="row"><button class="primary" id="btnSetSave">保存设置</button><button id="btnCloseModal">关闭</button></div>');
+  $('btnCloseModal').onclick = closeModal;
+  const body = $('setBody');
+  // 广告尾帧（+自定义URL）
+  const isCustomTail = s.tail_name === '自定义' || (!!s.tail_custom_url && !(o.tails || []).includes(s.tail_name));
+  const tailRow = row('<label>广告尾帧</label>');
+  const tailSel = selOf(o.tails, isCustomTail ? '自定义' : (s.tail_name || (o.tails || [])[0]), true);
+  tailRow.appendChild(tailSel); body.appendChild(tailRow);
+  const tailUrlRow = row('<label>自定义URL</label>');
+  const tailUrl = document.createElement('input'); tailUrl.type = 'text'; tailUrl.style.flex = '1';
+  tailUrl.placeholder = '自定义尾帧视频URL'; tailUrl.value = s.tail_custom_url || '';
+  tailUrlRow.appendChild(tailUrl); body.appendChild(tailUrlRow);
+  const syncTailUrl = () => { tailUrlRow.style.display = tailSel.value === '自定义' ? '' : 'none'; };
+  tailSel.onchange = syncTailUrl; syncTailUrl();
+  // 配音
+  const voiceRow = row('<label>配音音色</label>');
+  const voiceSel = selOf(o.voices, s.voice_name || (o.voices || [])[0]);
+  voiceRow.appendChild(voiceSel); body.appendChild(voiceRow);
+  // 转场
+  const t1Row = row('<label>转场1</label>'); const t1 = selOf(o.transitions, s.transition1 || (o.transitions || [])[0]); t1Row.appendChild(t1); body.appendChild(t1Row);
+  body.appendChild(row('<span class="muted">转场1：用户视频 → 定格帧</span>'));
+  const t2Row = row('<label>转场2</label>'); const t2 = selOf(o.transitions, s.transition2 || (o.transitions || [])[0]); t2Row.appendChild(t2); body.appendChild(t2Row);
+  body.appendChild(row('<span class="muted">转场2：定格帧 → 广告尾帧</span>'));
+  // BGM
+  const bgmCard = document.createElement('div'); bgmCard.className = 'subcard'; bgmCard.innerHTML = '<span class="tt">背景音乐 BGM</span>'; body.appendChild(bgmCard);
+  const bgmUp = row('');
+  const upBtn = document.createElement('button'); upBtn.className = 'primary'; upBtn.textContent = s.bgm_url ? '更换 BGM' : '上传 BGM';
+  upBtn.onclick = () => $('fileBgm').click();
+  const bgmState = document.createElement('span'); bgmState.className = 'muted'; bgmState.id = 'bgmState'; bgmState.textContent = s.bgm_url ? '已上传' : '未上传';
+  bgmUp.appendChild(upBtn); bgmUp.appendChild(bgmState); bgmCard.appendChild(bgmUp);
+  let vol = s.bgm_volume != null ? s.bgm_volume : 0.6, fin = s.bgm_fade_in || 0, fout = s.bgm_fade_out || 0;
+  bgmCard.appendChild(sliderRow('音量', 0, 1, 0.05, vol, v => Math.round(v * 100) + '%', v => vol = v));
+  bgmCard.appendChild(sliderRow('渐入', 0, 5, 0.5, fin, v => v + 's', v => fin = v));
+  bgmCard.appendChild(sliderRow('渐出', 0, 5, 0.5, fout, v => v + 's', v => fout = v));
+  $('btnSetSave').onclick = async () => {
+    const settings = {
+      tail_name: tailSel.value,
+      tail_custom_url: tailSel.value === '自定义' ? tailUrl.value.trim() : '',
+      voice_name: voiceSel.value,
+      transition1: t1.value, transition2: t2.value,
+      bgm_volume: vol, bgm_fade_in: fin, bgm_fade_out: fout,
+    };
+    try {
+      await api('/api/v1/h5/settings/save', { record_id: S.recordId, settings });
+      S.settings = { ...S.settings, ...settings };
+      toast('视频设置已保存'); closeModal();
+    } catch (e) { toast('保存失败：' + e.message); }
+  };
+};
+$('fileBgm').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f || !S.recordId) return;
+  toast('上传 BGM 中…');
+  try {
+    const r = await api(`/api/v1/h5/bgm/upload?record_id=${encodeURIComponent(S.recordId)}&filename=${encodeURIComponent(f.name)}`, f);
+    S.settings.bgm_url = r.url;
+    const st = $('bgmState'); if (st) st.textContent = '已上传：' + (f.name || '');
+    toast('BGM 已上传');
+  } catch (err) { toast('上传失败：' + err.message); }
+};
+
 /* ---------- 弹层 ---------- */
 function openModal(html) { $('modal').innerHTML = html; $('modal-bg').style.display = 'flex'; }
 function closeModal() { $('modal-bg').style.display = 'none'; }
@@ -1012,8 +1119,23 @@ $('btnSave').onclick = () => {
 /* 使用样式：从样式库挑一个套用到当前画布 */
 $('btnUseStyle').onclick = async () => {
   if (!S.doc) return;
-  openModal('<span class="tt">使用已保存的样式</span><div id="styleList" style="display:flex;flex-direction:column;gap:6px">加载中…</div><div class="row"><button id="btnCloseModal">关闭</button></div>');
+  openModal(`<span class="tt">使用样式</span>
+    <div id="styleList" style="display:flex;flex-direction:column;gap:6px">加载中…</div>
+    <div class="subcard"><span class="tt">导入样式参数</span>
+      <span class="muted">粘贴表格「样式参数」列的 JSON，或从其它记录导入</span>
+      <textarea id="styleJson" rows="3" style="width:100%;font-family:monospace;font-size:11px" placeholder='{"version":1,"layers":[...]}'></textarea>
+      <div class="row"><button class="primary" id="btnImportJson">粘贴导入</button><button id="btnImportRecord">从其它记录导入</button></div>
+    </div>
+    <div class="row"><button id="btnCloseModal">关闭</button></div>`);
   $('btnCloseModal').onclick = closeModal;
+  $('btnImportJson').onclick = () => {
+    const txt = $('styleJson').value.trim();
+    if (!txt) { toast('请先粘贴样式参数 JSON'); return; }
+    let doc; try { doc = JSON.parse(txt); } catch (err) { toast('JSON 解析失败：' + err.message); return; }
+    if (!doc || !Array.isArray(doc.layers)) { toast('不是有效的图层文档（缺 layers）'); return; }
+    applyStyle({ layer_doc: doc, name: '粘贴导入' }); closeModal();
+  };
+  $('btnImportRecord').onclick = openRecordImport;
   try {
     const data = await api('/api/v1/h5/styles/list', {});
     const g = $('styleList');
@@ -1038,7 +1160,33 @@ function applyStyle(s) {
   S.doc = JSON.parse(JSON.stringify(s.layer_doc));
   if (typeof s.guide_text === 'string' && s.guide_text) S.guideText = s.guide_text;
   buildStage();
-  toast('已应用样式：' + s.name);
+  toast('已应用样式：' + (s.name || ''));
+}
+
+async function openRecordImport() {
+  openModal('<span class="tt">从其它记录导入样式</span><div id="recImport" style="display:flex;flex-direction:column;gap:6px">加载中…</div><div class="row"><button id="btnCloseModal">关闭</button></div>');
+  $('btnCloseModal').onclick = closeModal;
+  try {
+    const data = await api('/api/v1/h5/records', {});
+    const rows = (data.records || []).filter(r => r.has_style && r.record_id !== S.recordId);
+    const g = $('recImport');
+    if (!rows.length) { g.innerHTML = '<span class="muted">没有其它已调样式的记录</span>'; return; }
+    g.innerHTML = '';
+    rows.forEach(r => {
+      const d = document.createElement('div'); d.className = 'row';
+      d.style.cssText = 'justify-content:space-between;background:var(--bg);border-radius:8px;padding:8px 10px';
+      const nm = document.createElement('span'); nm.textContent = r.name; nm.style.cssText = 'flex:1;min-width:0;word-break:break-all';
+      const use = document.createElement('button'); use.className = 'primary'; use.textContent = '导入';
+      use.onclick = async () => {
+        try {
+          const pr = await api('/api/v1/h5/params/get', { record_id: r.record_id });
+          applyStyle({ layer_doc: pr.layer_doc, guide_text: pr.guide_text, name: r.name });
+          closeModal();
+        } catch (e) { toast('导入失败：' + e.message); }
+      };
+      d.appendChild(nm); d.appendChild(use); g.appendChild(d);
+    });
+  } catch (e) { $('recImport').innerHTML = '加载失败：' + esc(e.message); }
 }
 $('btnRender').onclick = async () => {
   toast('服务端渲染中…');
@@ -1062,13 +1210,13 @@ function procBanner(state, text, link) {
 }
 function hideProcBanner() { $('procbanner').classList.remove('on'); }
 $('btnProcess').onclick = async () => {
+  procBanner('run', '正在提交…');  // 点击瞬间反馈，消除保存/提交两次网络请求的空档
   try {
-    if (!(await save(false, true))) return;
+    if (!(await save(false, true))) { hideProcBanner(); return; }
     await api('/api/v1/h5/process', { record_id: S.recordId });
     $('status').textContent = '已提交，处理中…（视频处理约需2-5分钟）';
     procBanner('run', '已提交，视频处理中…（约需 2–5 分钟，可继续操作）');
     startPoll();
-    toast('已提交处理');
   } catch (e) { procBanner('fail', '提交失败：' + e.message); toast('提交失败：' + e.message); }
 };
 function startPoll() {

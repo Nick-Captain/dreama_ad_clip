@@ -34,6 +34,7 @@ PUBLIC_BASE_URL = os.getenv(
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
 VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm")
+AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
 
 # v2：帧尺寸改用抽出 PNG 的实际像素（修复旋转视频编码/显示尺寸不一致），旧缓存作废
 FRAME_CACHE_PREFIX = "frame:v2:"
@@ -321,6 +322,23 @@ async def api_params_get(request: Request):
                 logger.warning(f"[h5/params] 搜索框附件读取失败: {e}")
         if not search_box_url:
             search_box_url = field_to_text(fields.get("搜索框图片URL")).strip()
+
+        # BGM 直链：附件优先，其次「BGM URL」列
+        bgm_url = ""
+        if fields.get("BGM"):
+            try:
+                bgm_url = attachment_to_download_url(BitableClient(), fields.get("BGM"))
+            except Exception as e:
+                logger.warning(f"[h5/params] BGM 附件读取失败: {e}")
+        if not bgm_url:
+            bgm_url = field_to_text(fields.get("BGM URL")).strip()
+
+        from tools.video_pipeline import BUILTIN_TAILS, VOICE_OPTIONS, TRANSITION_OPTIONS
+
+        def _num(name):
+            v = fields.get(name)
+            return v if isinstance(v, (int, float)) else None
+
         return {
             "layer_doc": doc,
             "source": source,
@@ -329,6 +347,22 @@ async def api_params_get(request: Request):
             "guide_options": GUIDE_TEXT_OPTIONS,
             "search_box_url": search_box_url,
             "record": _record_summary({"record_id": record_id, "fields": fields}),
+            "settings": {
+                "tail_name": field_to_text(fields.get("广告尾帧")).strip(),
+                "tail_custom_url": field_to_text(fields.get("自定义尾帧URL")).strip(),
+                "voice_name": field_to_text(fields.get("配音音色")).strip(),
+                "transition1": field_to_text(fields.get("转场1")).strip(),
+                "transition2": field_to_text(fields.get("转场2")).strip(),
+                "bgm_url": bgm_url,
+                "bgm_volume": _num("BGM音量"),
+                "bgm_fade_in": _num("BGM渐入"),
+                "bgm_fade_out": _num("BGM渐出"),
+            },
+            "options": {
+                "tails": list(BUILTIN_TAILS.keys()),
+                "voices": list(VOICE_OPTIONS.keys()),
+                "transitions": list(TRANSITION_OPTIONS.keys()),
+            },
         }
 
     return await asyncio.to_thread(_run)
@@ -368,6 +402,43 @@ async def api_params_save(request: Request):
 # ------------------------------------------------------------
 # 精确预览
 # ------------------------------------------------------------
+
+@router.post("/settings/save")
+async def api_settings_save(request: Request):
+    """保存视频级设置（广告尾帧/配音/转场/BGM音量与渐变）到记录"""
+    payload = await _json_body(request)
+    app_token, table_id = _table_of(payload)
+    record_id = payload.get("record_id", "")
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id 必填")
+    s = payload.get("settings") or {}
+
+    def _run():
+        from tools.bitable_tool import BitableClient
+        fields = {}
+        text_map = {
+            "tail_name": "广告尾帧",
+            "tail_custom_url": "自定义尾帧URL",
+            "voice_name": "配音音色",
+            "transition1": "转场1",
+            "transition2": "转场2",
+        }
+        for k, col in text_map.items():
+            if k in s and s[k] is not None:
+                fields[col] = s[k]
+        num_map = {"bgm_volume": "BGM音量", "bgm_fade_in": "BGM渐入", "bgm_fade_out": "BGM渐出"}
+        for k, col in num_map.items():
+            if k in s and s[k] is not None and s[k] != "":
+                try:
+                    fields[col] = float(s[k])
+                except (TypeError, ValueError):
+                    pass
+        if fields:
+            BitableClient().update_records(app_token, table_id, [{"record_id": record_id, "fields": fields}])
+        return {"success": True, "updated": list(fields.keys())}
+
+    return await asyncio.to_thread(_run)
+
 
 @router.post("/render")
 async def api_render(request: Request):
@@ -487,6 +558,40 @@ async def api_search_box_upload(request: Request, record_id: str = "", filename:
             [{"record_id": record_id, "fields": {"搜索框图片URL": url}}],
         )
         return {"url": url}
+
+    return await asyncio.to_thread(_run)
+
+
+@router.post("/bgm/upload")
+async def api_bgm_upload(request: Request, record_id: str = "", filename: str = "bgm.mp3"):
+    """上传 BGM 音频（原始字节流）→ 存对象存储 → 写入记录「BGM URL」列"""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in AUDIO_EXTS:
+        raise HTTPException(status_code=400, detail=f"仅支持音频格式: {AUDIO_EXTS}")
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id 必填")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="空文件")
+    if len(body) > 30 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="音频不能超过30MB")
+
+    def _run():
+        from tools.video_pipeline import _get_storage
+        from tools.bitable_tool import BitableClient
+        from io import BytesIO
+        storage = _get_storage()
+        key = storage.stream_upload_file(
+            fileobj=BytesIO(body),
+            file_name=f"h5/bgm/{uuid.uuid4().hex[:10]}{ext}",
+            content_type="audio/mpeg",
+        )
+        url = storage.generate_presigned_url(key=key, expire_time=2592000)
+        BitableClient().update_records(
+            DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID,
+            [{"record_id": record_id, "fields": {"BGM URL": url}}],
+        )
+        return {"url": url, "name": filename}
 
     return await asyncio.to_thread(_run)
 

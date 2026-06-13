@@ -633,10 +633,13 @@ def _mix_bgm(
     bgm_volume: float,
     output_path: str,
     uid: str,
+    fade_in: float = 0.0,
+    fade_out: float = 0.0,
 ) -> str:
     """
     下载最终视频和 BGM，将 BGM 裁剪到视频时长、调整音量后混入视频。
     bgm_volume: 0.0 ~ 1.0，默认 0.6
+    fade_in/fade_out: 淡入/淡出时长（秒），0=不启用
     """
     tmp_dir = tempfile.gettempdir()
 
@@ -651,10 +654,18 @@ def _mix_bgm(
     tmp_bgm = os.path.join(tmp_dir, f"bgm_{uid}.mp3")
     _download_file(bgm_url, tmp_bgm)
 
-    logger.info(f"[{uid}] BGM 混音: 视频时长={video_duration:.2f}s, BGM音量={bgm_volume:.0%}")
+    # 渐入/渐出：afade 滤镜，淡出从 (时长-淡出时长) 开始
+    afade = ""
+    if fade_in and float(fade_in) > 0:
+        afade += f",afade=t=in:st=0:d={float(fade_in):.2f}"
+    if fade_out and float(fade_out) > 0:
+        st = max(0.0, video_duration - float(fade_out))
+        afade += f",afade=t=out:st={st:.2f}:d={float(fade_out):.2f}"
 
-    # ffmpeg: 将 BGM 裁剪到视频时长 + 调整音量 + 混入视频
-    # 使用 amovie 滤镜读取 BGM，atrim 裁剪，volume 调音量，amix 混合
+    logger.info(f"[{uid}] BGM 混音: 视频时长={video_duration:.2f}s, BGM音量={bgm_volume:.0%}, "
+                f"渐入={fade_in}s, 渐出={fade_out}s")
+
+    # ffmpeg: 将 BGM 裁剪到视频时长 + 调整音量 + 可选渐入渐出 + 混入视频
     cmd = [
         "ffmpeg", "-y",
         "-i", tmp_video,
@@ -662,7 +673,7 @@ def _mix_bgm(
         "-i", tmp_bgm,
         "-filter_complex",
         (
-            f"[1:a]atrim=0:{video_duration},volume={bgm_volume}[bgm];"
+            f"[1:a]atrim=0:{video_duration},volume={bgm_volume}{afade}[bgm];"
             f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[outa]"
         ),
         "-map", "0:v:0",
@@ -710,6 +721,8 @@ def process_video_pipeline(
     search_box_image_url: str = "",
     bgm_url: str = "",
     bgm_volume: float = 0.6,
+    bgm_fade_in: float = 0.0,
+    bgm_fade_out: float = 0.0,
     style_layers: Optional[dict] = None,
     layer_context: Optional[dict] = None,
 ) -> dict:
@@ -870,6 +883,8 @@ def process_video_pipeline(
             bgm_volume=bgm_volume,
             output_path=bgm_output,
             uid=uid,
+            fade_in=bgm_fade_in,
+            fade_out=bgm_fade_out,
         )
         final_video_url = _upload_video_to_s3(bgm_output, f"temp/final_with_bgm_{uid}.mp4")
         logger.info(f"[{uid}] BGM混音后视频URL: {final_video_url}")
@@ -920,6 +935,8 @@ def process_ad_tail_video(
     search_box_image_url: str = "",
     bgm_url: str = "",
     bgm_volume: float = 0.6,
+    bgm_fade_in: float = 0.0,
+    bgm_fade_out: float = 0.0,
 ) -> str:
     """
     处理单个视频：提取最后一帧 → 合成搜索框 → 字幕分段TTS配音 → ffmpeg生成静止定格视频（含字幕+配音） → 拼接 → 可选BGM混音。
@@ -953,6 +970,8 @@ def process_ad_tail_video(
             search_box_image_url=search_box_image_url,
             bgm_url=bgm_url,
             bgm_volume=bgm_volume,
+            bgm_fade_in=bgm_fade_in,
+            bgm_fade_out=bgm_fade_out,
         )
         return json.dumps(result, ensure_ascii=False)
     except Exception as e:

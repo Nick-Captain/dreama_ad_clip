@@ -285,6 +285,14 @@ def batch_process_from_bitable(
                     except (TypeError, ValueError):
                         _bgm_volume = 0.6
 
+                    def _num(name):
+                        try:
+                            return float(fields.get(name) or 0)
+                        except (TypeError, ValueError):
+                            return 0.0
+                    _bgm_fade_in = _num("BGM渐入")
+                    _bgm_fade_out = _num("BGM渐出")
+
                     # 图层样式：记录级「样式参数」> 全局默认 > 内置默认
                     _layer_doc = resolve_layer_doc(
                         field_to_text(fields.get("样式参数")),
@@ -304,6 +312,8 @@ def batch_process_from_bitable(
                         search_box_image_url=_search_box_url,
                         bgm_url=_bgm_url,
                         bgm_volume=_bgm_volume,
+                        bgm_fade_in=_bgm_fade_in,
+                        bgm_fade_out=_bgm_fade_out,
                         style_layers=_layer_doc,
                         layer_context=_layer_ctx,
                     )

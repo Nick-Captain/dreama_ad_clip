@@ -132,6 +132,10 @@ TEMPLATE_FIELDS = [
         "type": 17,  # 附件
     },
     {
+        "field_name": "搜索框图片URL",
+        "type": 1,  # 文本：H5 编辑器内上传的搜索框图片直链；附件列优先，此列兜底。预览与成片均读取
+    },
+    {
         "field_name": "BGM",
         "type": 17,  # 附件
     },
@@ -319,7 +323,7 @@ class BitableClient:
 
 
 # 历史遗留的冗余列：新建 Base 自带的示例列 + 旧版模板的重复/改版字段
-LEGACY_FIELDS_TO_DELETE = ("文本", "单选", "日期", "字幕", "搜索框图片URL", "BGM URL")
+LEGACY_FIELDS_TO_DELETE = ("文本", "单选", "日期", "字幕", "BGM URL")
 
 
 def _count_field_usage(client: "BitableClient", app_token: str, table_id: str, field_names: list) -> dict:

@@ -15,6 +15,7 @@
 - image           图片贴图。x/y=图片中心，scale=宽度占比；可带 animation
 
 文字样式：color(#RRGGBB)、stroke{color,width}、shadow{color,opacity,blur}
+不透明度 opacity：0~1，作用于图片与文字整体（默认 1=不透明）；可重命名 name 字段
 显示时机 timing："full"=全程显示，{"segment": N}=跟随引导语第 N 段（从 0 计）
 动画 animation：{"type": "shake"|"float"|"blink", "amplitude":..., "speed":...}
 """

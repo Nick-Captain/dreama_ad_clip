@@ -109,6 +109,10 @@ def render_text_canvas(
                   stroke_width=stroke_width, stroke_fill=stroke_color)
     else:
         draw.text((tx, ty), text, font=font, fill=fill_color)
+
+    opacity = float(layer.get("opacity", 1) or 1)
+    if opacity < 1:
+        img.putalpha(img.getchannel("A").point(lambda a: int(a * opacity)))
     return img
 
 
@@ -129,7 +133,7 @@ def _animation_exprs(layer: dict, base_x: int, base_y: int, canvas_w: int, canva
     speed = float(anim.get("speed", 0) or 0)
     if kind == "shake":
         amp = int(canvas_w * float(anim.get("amplitude", 0.012) or 0.012))
-        freq = speed or 2.0
+        freq = speed or 1.0
         return f"{base_x}+{amp}*sin(2*PI*{freq}*t)", str(base_y), None
     if kind == "float":
         amp = int(canvas_h * float(anim.get("amplitude", 0.018) or 0.018))
@@ -296,6 +300,9 @@ def build_freeze_render_plan(
             target_w = max(1, int(canvas_w * float(layer.get("scale", 0.2) or 0.2)))
             target_h = max(1, int(im.height * target_w / im.width))
             im = im.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            op = float(layer.get("opacity", 1) or 1)
+            if op < 1:
+                im.putalpha(im.getchannel("A").point(lambda a: int(a * op)))
             pos_x = int(canvas_w * float(layer.get("x", 0.5) or 0.5) - target_w / 2)
             pos_y = int(canvas_h * float(layer.get("y", 0.5) or 0.5) - target_h / 2)
             seg_enable = _segment_enable_expr(layer, bounds)

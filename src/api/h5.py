@@ -457,6 +457,40 @@ async def api_asset_upload(request: Request, filename: str = "asset.png"):
     return await asyncio.to_thread(_run)
 
 
+@router.post("/search-box/upload")
+async def api_search_box_upload(request: Request, record_id: str = "", filename: str = "search_box.png"):
+    """上传搜索框图片（原始字节流）→ 存对象存储 → 写入记录「搜索框图片URL」列（预览与成片都读它）"""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in IMAGE_EXTS:
+        raise HTTPException(status_code=400, detail=f"仅支持图片格式: {IMAGE_EXTS}")
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id 必填")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="空文件")
+    if len(body) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片不能超过20MB")
+
+    def _run():
+        from tools.video_pipeline import _get_storage
+        from tools.bitable_tool import BitableClient
+        from io import BytesIO
+        storage = _get_storage()
+        key = storage.stream_upload_file(
+            fileobj=BytesIO(body),
+            file_name=f"h5/search_box/{uuid.uuid4().hex[:10]}{ext}",
+            content_type=f"image/{ext.lstrip('.').replace('jpg', 'jpeg')}",
+        )
+        url = storage.generate_presigned_url(key=key, expire_time=2592000)
+        BitableClient().update_records(
+            DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID,
+            [{"record_id": record_id, "fields": {"搜索框图片URL": url}}],
+        )
+        return {"url": url}
+
+    return await asyncio.to_thread(_run)
+
+
 @router.get("/assets")
 async def api_assets():
     def _run():

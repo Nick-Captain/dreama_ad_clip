@@ -70,8 +70,23 @@ main { padding: 14px 16px; }
 #upprogress .upfill { height: 100%; width: 0; background: var(--brand); border-radius: 99px; transition: width 0.2s; }
 #upprogress .uptext { font-size: 12px; font-weight: 600; flex: none; min-width: 44px; text-align: right; }
 /* 图层拖拽 */
-.chip { touch-action: none; }
-.chip.drag { opacity: 0.6; }
+.chip { touch-action: none; user-select: none; -webkit-user-select: none; }
+.chip.drag { opacity: 0.92; box-shadow: 0 6px 18px rgba(0,0,0,0.35); cursor: grabbing; }
+.chip .ic { font-weight: 700; opacity: 0.85; font-family: monospace; }
+body.dragging { user-select: none; -webkit-user-select: none; }
+/* 处理中醒目横幅 */
+#procbanner { display: none; position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 90;
+  background: var(--card); border: 1px solid var(--border); border-left: 4px solid var(--brand); border-radius: 12px;
+  padding: 12px 18px; box-shadow: 0 6px 24px rgba(0,0,0,0.3); align-items: center; gap: 12px; max-width: 92vw; font-size: 14px; }
+#procbanner.on { display: flex; }
+#procbanner.ok { border-left-color: var(--brand); }
+#procbanner.fail { border-left-color: var(--danger); }
+#procbanner .spin { width: 18px; height: 18px; border: 3px solid var(--border); border-top-color: var(--brand);
+  border-radius: 50%; animation: spin 0.8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#procbanner .txt { font-weight: 600; }
+#procbanner a { color: var(--brand); font-weight: 600; }
+#procbanner .x { cursor: pointer; color: var(--muted); margin-left: 4px; font-size: 13px; }
 .badge { font-size: 11px; padding: 2px 9px; border-radius: 99px; display: inline-block; }
 .b-wait { background: var(--yellow); color: #633806; }
 .b-run { background: var(--blue); color: #042C53; }
@@ -173,6 +188,8 @@ input[type="color"] { width: 26px; height: 26px; border: none; background: none;
 
 <div id="modal-bg"><div id="modal"></div></div>
 <div id="toast"></div>
+<div id="procbanner"></div>
+<input type="file" id="fileSearchBox" accept="image/*" style="display:none">
 <div id="upprogress">
   <span class="upname" id="upname"></span>
   <div class="upbar"><div class="upfill" id="upfill"></div></div>
@@ -266,6 +283,7 @@ function setThumb(card, url) {
 async function showHome() {
   $('view-home').style.display = '';
   $('view-editor').style.display = 'none';
+  hideProcBanner();
   $('fileinfo').textContent = '造梦次元 · 广告尾帧工作台';
   $('btnBackEditor').style.display = S.recordId ? '' : 'none';
   applyViewMode();
@@ -427,6 +445,9 @@ async function buildStage() {
     anchorFill: '#06C755', anchorStroke: '#06C755', borderStroke: '#06C755', anchorSize: 9,
   });
   S.layerK.add(S.tr);
+  S.guideV = new Konva.Line({ points: [W / 2, 0, W / 2, H], stroke: '#06C755', strokeWidth: 1, dash: [5, 4], visible: false, listening: false });
+  S.guideH = new Konva.Line({ points: [0, H / 2, W, H / 2], stroke: '#06C755', strokeWidth: 1, dash: [5, 4], visible: false, listening: false });
+  S.layerK.add(S.guideV); S.layerK.add(S.guideH);
   for (const layer of S.doc.layers) await addNode(layer);
   S.layerK.draw();
   startAnim();
@@ -437,12 +458,21 @@ async function buildStage() {
 
 let _lidSeq = 0;
 function lid(layer) { if (!layer._lid) layer._lid = layer.id || ('ly' + (++_lidSeq)); return layer._lid; }
-function layerName(l) {
+function defaultLayerName(l) {
   if (l.type === 'search_box') return '搜索框';
   if (l.type === 'guide_subtitle') return '引导语';
   if (l.type === 'text') return l.text_source === '角色名' ? '角色名' : '字幕';
   if (l.type === 'image') return '图片';
   return l.type;
+}
+function layerName(l) { return (l.name && l.name.trim()) ? l.name.trim() : defaultLayerName(l); }
+// 类型符号：文字类（字幕/引导语/角色名）= T；图片类（图片/搜索框）= ▦
+function layerIcon(l) { return (l.type === 'image' || l.type === 'search_box') ? '▦' : 'T'; }
+function renameLayer(l) {
+  const nv = prompt('重命名图层（留空恢复默认名）', l.name || '');
+  if (nv === null) return;
+  l.name = nv.trim() || undefined;
+  renderChips(); renderProps();
 }
 function textOf(l) {
   if (l.type === 'guide_subtitle') return S.guideText || '（留空=随机文案）';
@@ -482,11 +512,33 @@ async function addNode(layer) {
   }
   node.setAttr('lid', id);
   node.visible(layer.visible !== false);
+  node.opacity(layer.opacity ?? 1);
   node.on('click tap', () => select(id));
+  node.on('dragmove', () => snapToCenter(node));
+  node.on('dragend', hideGuides);
   node.on('dragend transformend', () => syncBack(layer, node));
   S.nodes.set(id, node);
   S.layerK.add(node);
   if (S.tr) S.tr.moveToTop();
+}
+
+const SNAP_PX = 7;
+function snapToCenter(node) {
+  if (!S.guideV) return;
+  const W = S.stage.width(), H = S.stage.height();
+  const w = node.width() * node.scaleX(), h = node.height() * node.scaleY();
+  const cx = node.x() + w / 2, cy = node.y() + h / 2;
+  if (Math.abs(cx - W / 2) < SNAP_PX) { node.x(W / 2 - w / 2); S.guideV.visible(true); S.guideV.moveToTop(); }
+  else S.guideV.visible(false);
+  if (Math.abs(cy - H / 2) < SNAP_PX) { node.y(H / 2 - h / 2); S.guideH.visible(true); S.guideH.moveToTop(); }
+  else S.guideH.visible(false);
+  if (S.tr) S.tr.moveToTop();
+  S.layerK.batchDraw();
+}
+function hideGuides() {
+  if (S.guideV) S.guideV.visible(false);
+  if (S.guideH) S.guideH.visible(false);
+  if (S.layerK) S.layerK.batchDraw();
 }
 
 function applyTextStyle(node, layer) {
@@ -515,6 +567,16 @@ function syncBack(layer, node) {
     layer.x = +((node.x() + w / 2) / W).toFixed(4);
     layer.y = +((node.y() + h / 2) / H).toFixed(4);
   } else {
+    // 文字：变换框拖角缩放 → 映射到字号（保持中心不变），再把 scale 复位
+    const sc = node.scaleX();
+    if (Math.abs(sc - 1) > 0.001) {
+      const cx0 = node.x() + node.width() * sc / 2, cy0 = node.y() + node.height() * sc / 2;
+      const newFont = Math.max(10, node.fontSize() * sc);
+      node.scaleX(1); node.scaleY(1);
+      node.fontSize(newFont);
+      layer.size = +(newFont / W).toFixed(4);
+      node.x(cx0 - node.width() / 2); node.y(cy0 - node.height() / 2);
+    }
     layer.x = +((node.x() + node.width() / 2) / W).toFixed(4);
     layer.y = +((node.y() + node.height() / 2) / H).toFixed(4);
   }
@@ -529,12 +591,15 @@ function startAnim() {
       const node = S.nodes.get(lid(layer));
       if (!node) continue;
       const a = layer.animation, W = S.stage.width(), H = S.stage.height();
-      if (a.type === 'shake') node.offsetX(-Math.sin(2 * Math.PI * (a.speed || 2) * t) * W * (a.amplitude || 0.012));
+      const base = layer.opacity ?? 1;
+      if (a.type === 'shake') node.offsetX(-Math.sin(2 * Math.PI * (a.speed || 1) * t) * W * (a.amplitude || 0.012));
       else node.offsetX(0);
       if (a.type === 'float') node.offsetY(-Math.sin(2 * Math.PI * (a.speed || 0.8) * t) * H * (a.amplitude || 0.018));
       else if (a.type !== 'shake') node.offsetY(0);
-      if (a.type === 'blink') node.opacity((t % 0.9) < 0.55 ? 1 : 0.15);
-      else node.opacity(1);
+      if (a.type === 'blink') {
+        const period = 1 / (a.speed || 1.1);
+        node.opacity((t % period) < period * 0.6 ? base : base * 0.2);
+      } else node.opacity(base);
     }
   }, S.layerK);
   S.anim.start();
@@ -560,12 +625,25 @@ function attachChipDrag(chip) {
   chip.addEventListener('pointerdown', e => {
     if (e.target.classList.contains('eye')) return;
     if (e.button) return;
+    e.preventDefault();  // 阻止拖拽时框选图层条内的文字
     const sx = e.clientX, sy = e.clientY;
     let dragging = false;
+    const follow = ev => {
+      chip.style.transform = 'translate(0,0)';
+      const r = chip.getBoundingClientRect();
+      chip.style.transform = `translate(${ev.clientX - (r.left + r.width / 2)}px,${ev.clientY - (r.top + r.height / 2)}px)`;
+    };
     const onMove = ev => {
       if (!dragging && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 6) return;
-      dragging = true; chip._moved = true; chip.classList.add('drag');
+      if (!dragging) {
+        dragging = true; chip._moved = true; chip.classList.add('drag');
+        document.body.classList.add('dragging');
+        chip.style.position = 'relative'; chip.style.zIndex = '20';
+      }
+      // 被拖块设为穿透，让 elementFromPoint 命中其下方的目标块
+      chip.style.pointerEvents = 'none';
       const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      chip.style.pointerEvents = '';
       const target = el && el.closest('.chip');
       const cont = $('chips');
       if (target && target !== chip && target.parentNode === cont) {
@@ -573,11 +651,13 @@ function attachChipDrag(chip) {
         if (chips.indexOf(chip) < chips.indexOf(target)) cont.insertBefore(chip, target.nextSibling);
         else cont.insertBefore(chip, target);
       }
+      follow(ev);
     };
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
-      chip.classList.remove('drag');
+      chip.classList.remove('drag'); document.body.classList.remove('dragging');
+      chip.style.transform = ''; chip.style.position = ''; chip.style.zIndex = ''; chip.style.pointerEvents = '';
       if (dragging) commitChipOrder();
     };
     document.addEventListener('pointermove', onMove);
@@ -591,7 +671,7 @@ function renderChips() {
     const chip = document.createElement('span');
     chip.dataset.lid = lid(l);
     chip.className = 'chip' + (lid(l) === S.selId ? ' sel' : '') + (l.visible === false ? ' hid' : '');
-    chip.innerHTML = `<span>${layerName(l)}</span><span class="eye">${l.visible === false ? '🚫' : '👁'}</span>`;
+    chip.innerHTML = `<span class="ic">${layerIcon(l)}</span><span class="lname">${esc(layerName(l))}</span><span class="eye">${l.visible === false ? '🚫' : '👁'}</span>`;
     chip.querySelector('.eye').onclick = e => {
       e.stopPropagation();
       l.visible = l.visible === false;
@@ -599,6 +679,7 @@ function renderChips() {
       renderChips();
     };
     chip.onclick = () => { if (chip._moved) { chip._moved = false; return; } select(lid(l)); };
+    chip.ondblclick = e => { e.stopPropagation(); renameLayer(l); };
     attachChipDrag(chip);
     c.appendChild(chip);
   });
@@ -606,9 +687,9 @@ function renderChips() {
 
 function select(id) {
   S.selId = id;
-  const layer = S.doc.layers.find(l => lid(l) === id);
   const node = S.nodes.get(id);
-  if (S.tr) S.tr.nodes(node && layer && (layer.type === 'image' || layer.type === 'search_box') ? [node] : []);
+  // 图片/搜索框/文字均显示变换框；文字拖角缩放映射为字号（见 syncBack）
+  if (S.tr) S.tr.nodes(node ? [node] : []);
   renderChips(); renderProps();
 }
 
@@ -648,6 +729,14 @@ function sliderRow(labelText, min, max, step, value, fmt, onChange) {
   return d;
 }
 
+function opacityRow(layer) {
+  return sliderRow('不透明度', 0, 1, 0.05, layer.opacity ?? 1, v => Math.round(v * 100) + '%', v => {
+    layer.opacity = v;
+    const n = S.nodes.get(lid(layer));
+    if (n) { n.opacity(v); S.layerK.batchDraw(); }
+  });
+}
+
 function refreshTextNode(layer) {
   const node = S.nodes.get(lid(layer));
   if (!node) return;
@@ -665,9 +754,12 @@ function renderProps() {
   const p = $('props'); p.innerHTML = '';
   const layer = S.doc.layers.find(l => lid(l) === S.selId);
   if (!layer) { p.innerHTML = '<span class="muted">点击画布或图层条选择一个图层</span>'; return; }
-  const title = row(`<label style="min-width:0;font-weight:600;color:var(--text)">${layerName(layer)}</label>`);
+  const title = row(`<label style="min-width:0;font-weight:600;color:var(--text)">${layerIcon(layer)} ${esc(layerName(layer))}</label>`);
+  const ren = document.createElement('button'); ren.textContent = '✎ 重命名'; ren.style.marginLeft = 'auto';
+  ren.onclick = () => renameLayer(layer);
+  title.appendChild(ren);
   if (!['search_box', 'guide_subtitle'].includes(layer.type) && layer.text_source !== '角色名') {
-    const del = document.createElement('button'); del.textContent = '删除图层'; del.style.marginLeft = 'auto';
+    const del = document.createElement('button'); del.textContent = '删除图层';
     del.onclick = () => {
       S.doc.layers = S.doc.layers.filter(l => l !== layer);
       const n = S.nodes.get(lid(layer)); if (n) n.destroy();
@@ -678,12 +770,17 @@ function renderProps() {
   p.appendChild(title);
 
   if (layer.type === 'search_box') {
-    if (!S.searchBoxUrl) p.appendChild(row('<span class="muted">该记录没有搜索框图片（表格「搜索框图片」列上传后生效）</span>'));
+    const up = document.createElement('button'); up.className = 'primary';
+    up.textContent = S.searchBoxUrl ? '更换搜索框图片' : '上传搜索框图片';
+    up.onclick = () => $('fileSearchBox').click();
+    const ur = row(''); ur.appendChild(up); p.appendChild(ur);
+    if (!S.searchBoxUrl) p.appendChild(row('<span class="muted">该记录还没有搜索框图片，点上方按钮上传（也可在表格「搜索框图片」列上传）</span>'));
     p.appendChild(sliderRow('大小', 0.2, 1.0, 0.01, layer.scale ?? 0.7, v => Math.round(v * 100) + '%', v => {
       layer.scale = v; const n = S.nodes.get(lid(layer));
       if (n) { const W = S.stage.width(); const ratio = n.height() / n.width(); const cx = n.x() + n.width() * n.scaleX() / 2;
         n.scaleX(1); n.scaleY(1); n.width(W * v); n.height(W * v * ratio); n.x(cx - n.width() / 2); S.layerK.batchDraw(); }
     }));
+    p.appendChild(opacityRow(layer));
     p.appendChild(row('<span class="muted">位置直接在画布拖拽，角点缩放</span>'));
     return;
   }
@@ -696,6 +793,7 @@ function renderProps() {
         n.scaleX(1); n.scaleY(1); n.width(W * v); n.height(W * v * ratio);
         n.x(cx - n.width() / 2); n.y(cyp - n.height() / 2); S.layerK.batchDraw(); }
     }));
+    p.appendChild(opacityRow(layer));
     const animSel = row('<label>动画</label>');
     const sel = document.createElement('select');
     [['', '无'], ['shake', '抖动'], ['float', '上下浮动'], ['blink', '闪烁']].forEach(([v, t]) => {
@@ -705,12 +803,15 @@ function renderProps() {
     });
     sel.onchange = () => { layer.animation = sel.value ? { type: sel.value } : null; renderProps(); };
     animSel.appendChild(sel); p.appendChild(animSel);
-    if (layer.animation?.type === 'shake' || layer.animation?.type === 'float') {
-      const isShake = layer.animation.type === 'shake';
+    const at = layer.animation?.type;
+    if (at === 'shake' || at === 'float') {
+      const isShake = at === 'shake';
       p.appendChild(sliderRow('幅度', 0.004, 0.06, 0.002, layer.animation.amplitude ?? (isShake ? 0.012 : 0.018),
         v => (v * 100).toFixed(1) + '%', v => layer.animation.amplitude = v));
-      p.appendChild(sliderRow('速度', isShake ? 1 : 0.3, isShake ? 16 : 3, isShake ? 0.5 : 0.1,
-        layer.animation.speed ?? (isShake ? 2 : 0.8), v => v + 'Hz', v => layer.animation.speed = v));
+      p.appendChild(sliderRow('速度', isShake ? 0.1 : 0.3, isShake ? 16 : 3, 0.1,
+        layer.animation.speed ?? (isShake ? 1 : 0.8), v => v + 'Hz', v => layer.animation.speed = v));
+    } else if (at === 'blink') {
+      p.appendChild(sliderRow('速度', 0.3, 5, 0.1, layer.animation.speed ?? 1.1, v => v + 'Hz', v => layer.animation.speed = v));
     }
     p.appendChild(timingRow(layer));
     return;
@@ -760,6 +861,7 @@ function renderProps() {
   p.appendChild(sliderRow('字号', 0.02, 0.12, 0.002, layer.size ?? 0.06,
     v => (v * 100).toFixed(1) + '%', v => { layer.size = v; refreshTextNode(layer); }));
   p.appendChild(colorRow('字色', layer.color || '#FFFFFF', c => { layer.color = c; refreshTextNode(layer); renderProps(); }));
+  p.appendChild(opacityRow(layer));
 
   const sc = document.createElement('div'); sc.className = 'subcard';
   sc.innerHTML = '<span class="tt">描边</span>';
@@ -841,6 +943,25 @@ function addImageLayer(url) {
   const layer = { type: 'image', url, visible: true, x: 0.5, y: 0.4, scale: 0.5, animation: null, timing: 'full' };
   S.doc.layers.push(layer);
   addNode(layer).then(() => { renderChips(); select(lid(layer)); });
+}
+
+/* 搜索框图片上传：写入记录「搜索框图片URL」列，预览与成片都会读取 */
+$('fileSearchBox').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f || !S.recordId) return;
+  toast('上传搜索框图片中…');
+  try {
+    const r = await api(`/api/v1/h5/search-box/upload?record_id=${encodeURIComponent(S.recordId)}&filename=${encodeURIComponent(f.name)}`, f);
+    await setSearchBox(r.url); toast('搜索框图片已更新');
+  } catch (err) { toast('上传失败：' + err.message); }
+};
+async function setSearchBox(url) {
+  S.searchBoxUrl = url;
+  let sb = S.doc.layers.find(l => l.type === 'search_box');
+  if (!sb) { sb = { type: 'search_box', visible: true, x: 0.5, y: 0.15, scale: 0.7 }; S.doc.layers.unshift(sb); }
+  const old = S.nodes.get(lid(sb)); if (old) { old.destroy(); S.nodes.delete(lid(sb)); }
+  await addNode(sb);
+  restackNodes(); renderChips(); select(lid(sb));
 }
 
 /* ---------- 弹层 ---------- */
@@ -932,14 +1053,23 @@ $('btnRender').onclick = async () => {
     $('btnCloseModal').onclick = closeModal;
   } catch (e) { toast('预览失败：' + e.message); }
 };
+function procBanner(state, text, link) {
+  const b = $('procbanner');
+  b.className = 'on' + (state === 'ok' ? ' ok' : state === 'fail' ? ' fail' : '');
+  const icon = state === 'run' ? '<span class="spin"></span>' : state === 'ok' ? '<span>✅</span>' : '<span>❌</span>';
+  b.innerHTML = `${icon}<span class="txt">${esc(text)}</span>${link ? ` <a href="${esc(link)}" target="_blank">查看成片</a>` : ''}<span class="x" id="procX">✕</span>`;
+  $('procX').onclick = () => b.classList.remove('on');
+}
+function hideProcBanner() { $('procbanner').classList.remove('on'); }
 $('btnProcess').onclick = async () => {
   try {
     if (!(await save(false, true))) return;
     await api('/api/v1/h5/process', { record_id: S.recordId });
     $('status').textContent = '已提交，处理中…（视频处理约需2-5分钟）';
+    procBanner('run', '已提交，视频处理中…（约需 2–5 分钟，可继续操作）');
     startPoll();
     toast('已提交处理');
-  } catch (e) { toast('提交失败：' + e.message); }
+  } catch (e) { procBanner('fail', '提交失败：' + e.message); toast('提交失败：' + e.message); }
 };
 function startPoll() {
   stopPoll();
@@ -949,11 +1079,14 @@ function startPoll() {
       if (r.status === '成功') {
         stopPoll();
         $('status').innerHTML = `✅ 处理完成：<a href="${r.output_video_url}" target="_blank">查看成片</a>`;
+        procBanner('ok', '处理完成！', r.output_video_url);
       } else if (r.status === '失败') {
         stopPoll();
         $('status').textContent = '❌ 处理失败：' + (r.error || '').slice(0, 160);
+        procBanner('fail', '处理失败：' + (r.error || '未知错误').slice(0, 80));
       } else {
         $('status').textContent = `处理中…（状态：${r.status || '排队'}）`;
+        procBanner('run', `视频处理中…（状态：${r.status || '排队'}）`);
       }
     } catch (e) {}
   }, 5000);

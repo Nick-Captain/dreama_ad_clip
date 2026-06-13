@@ -586,6 +586,54 @@ def _generate_freeze_video_from_plan(
     return output_path
 
 
+def _normalize_tail(tail_url: str, target_w: int, target_h: int, output_path: str, uid: str) -> str:
+    """把广告尾帧重编码为 H.264 / 30fps / 目标尺寸（缩放保比+黑边填充），
+    使云端转场不因编解码(HEVC)、帧率(60)、尺寸不匹配而退化为硬切。"""
+    tmp_tail = os.path.join(tempfile.gettempdir(), f"tail_src_{uid}.mp4")
+    _download_file(tail_url, tmp_tail)
+    vf = (
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-i", tmp_tail,
+        "-vf", vf, "-r", "30",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        output_path,
+    ]
+    try:
+        with _HEAVY_FFMPEG_SEMAPHORE:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("尾帧规格化超时")
+    finally:
+        try:
+            os.remove(tmp_tail)
+        except Exception:
+            pass
+    if result.returncode != 0:
+        raise RuntimeError(f"尾帧规格化失败: {result.stderr[-300:]}")
+    return output_path
+
+
+def _prepare_tail_url(tail_url: str, target_w: int, target_h: int, tmp_dir: str, uid: str) -> str:
+    """规格化尾帧并上传，返回新URL；失败则返回原URL（至少不阻断出片）。"""
+    try:
+        norm = os.path.join(tmp_dir, f"tailn_{uid}.mp4")
+        _normalize_tail(tail_url, target_w, target_h, norm, uid)
+        url = _upload_video_to_s3(norm, f"temp/tailn_{uid}.mp4")
+        try:
+            os.remove(norm)
+        except Exception:
+            pass
+        logger.info(f"[{uid}] 尾帧已规格化为 {target_w}x{target_h} H.264/30fps")
+        return url
+    except Exception as e:
+        logger.warning(f"[{uid}] 尾帧规格化失败，用原尾帧（转场可能不生效）: {e}")
+        return tail_url
+
+
 def _generate_overlays_over_video(video_local: str, plan, base_t0: float, output_path: str, uid: str) -> str:
     """黑屏渐显：把图层（静态底图 + 各自动画 overlay）叠加到用户视频末段（无配音、无中间帧）。
     plan: 由 build_freeze_render_plan(transparent_base=True, base_t0=...) 生成。"""
@@ -810,6 +858,7 @@ def process_video_pipeline(
             tail_url = BUILTIN_TAILS.get(tail_name)
             if not tail_url:
                 raise ValueError(f"未找到内置尾帧「{tail_name}」，可选：{list(BUILTIN_TAILS.keys())}")
+        tail_url = _prepare_tail_url(tail_url, cw, ch, tmp_dir, uid)  # 规格化，避免转场退化硬切
         t2_id = TRANSITION_OPTIONS.get(transition2_name)
         logger.info(f"[{uid}] 黑屏渐显拼接: [末段视频, 尾帧] 转场2={transition2_name}({t2_id})")
         concat_resp = VideoEditClient(ctx=ctx).concat_videos(
@@ -943,6 +992,14 @@ def process_video_pipeline(
         tail_url = BUILTIN_TAILS.get(tail_name)
         if not tail_url:
             raise ValueError(f"未找到内置尾帧「{tail_name}」，可选：{list(BUILTIN_TAILS.keys())}")
+
+    # 规格化尾帧到内容显示尺寸/H.264/30fps，避免转场→尾帧因格式不匹配退化硬切
+    try:
+        with Image.open(last_frame_path) as _fim:
+            _dw, _dh = _fim.size
+    except Exception:
+        _dw, _dh = video_w, video_h
+    tail_url = _prepare_tail_url(tail_url, _dw, _dh, tmp_dir, uid)
 
     t1_id = TRANSITION_OPTIONS.get(transition1_name)
     t2_id = TRANSITION_OPTIONS.get(transition2_name)

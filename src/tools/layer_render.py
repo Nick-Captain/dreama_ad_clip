@@ -398,6 +398,10 @@ def build_freeze_render_plan(
             enable_expr=enable, prefilter=prefilter, cx=cx, cy=cy,
         ))
 
+    # 一旦某图层成为 overlay（动画/分段/引导语），其后的图层即使是静态的也必须做成 overlay，
+    # 否则会被拍进底图、被上层覆盖，z 序错乱（黑屏渐显下搜索框盖住字幕即此问题）。
+    seen_overlay = False
+
     for layer in layer_doc.get("layers", []):
         if not layer.get("visible", True):
             continue
@@ -418,8 +422,8 @@ def build_freeze_render_plan(
             sb = _rotate_expand(sb, layer)
             cx = canvas_w * float(layer.get("x", 0.5) or 0.5)
             cy = canvas_h * float(layer.get("y", 0.18) or 0.18)  # 中心定位（与图片一致）
-            if _has_motion(layer):
-                _motion_overlay(sb, cx, cy, "sb", None)
+            if _has_motion(layer) or seen_overlay:
+                _motion_overlay(sb, cx, cy, "sb", None); seen_overlay = True
             else:
                 base.paste(sb, (int(cx - sb.width / 2), int(cy - sb.height / 2)), sb)
             continue
@@ -436,6 +440,7 @@ def build_freeze_render_plan(
                     path=path, x_expr=x_expr, y_expr=y_expr,
                     enable_expr=_combine_enable(seg_en, anim_en), prefilter=prefilter, cx=cx, cy=cy,
                 ))
+            seen_overlay = True
             continue
 
         if ltype == "text":
@@ -443,11 +448,11 @@ def build_freeze_render_plan(
             if not text:
                 continue
             seg_enable = _segment_enable_expr(layer, bounds)
-            if not _has_motion(layer) and seg_enable is None:
+            if not _has_motion(layer) and seg_enable is None and not seen_overlay:
                 base = Image.alpha_composite(base, render_text_canvas(canvas_w, canvas_h, text, layer, font_path))
             else:
                 img, cx, cy = render_text_tight(canvas_w, canvas_h, text, layer, font_path)
-                _motion_overlay(img, cx, cy, "text", seg_enable)
+                _motion_overlay(img, cx, cy, "text", seg_enable); seen_overlay = True
             continue
 
         if ltype == "image":
@@ -467,10 +472,10 @@ def build_freeze_render_plan(
             cx = canvas_w * float(layer.get("x", 0.5) or 0.5)
             cy = canvas_h * float(layer.get("y", 0.5) or 0.5)
             seg_enable = _segment_enable_expr(layer, bounds)
-            if not _has_motion(layer) and seg_enable is None:
+            if not _has_motion(layer) and seg_enable is None and not seen_overlay:
                 base.paste(im, (int(cx - im.width / 2), int(cy - im.height / 2)), im)
             else:
-                _motion_overlay(im, cx, cy, "img", seg_enable)
+                _motion_overlay(im, cx, cy, "img", seg_enable); seen_overlay = True
             continue
 
         logger.warning(f"[{uid}] 未知图层类型已忽略: {ltype}")

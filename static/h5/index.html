@@ -335,7 +335,7 @@ async function showHome() {
         </div>`;
       div.querySelector('[data-act="edit"]').onclick = () => openEditor(r.record_id);
       const ob = div.querySelector('[data-act="out"]');
-      if (ob) ob.onclick = () => window.open(r.output_video_url, '_blank');
+      if (ob) ob.onclick = () => window.open('/api/v1/h5/download?record_id=' + encodeURIComponent(r.record_id), '_blank');
       div.querySelector('[data-act="del"]').onclick = () => deleteRecord(r, div);
       $('records').appendChild(div);
       if (!r.thumbnail_url) queueThumb(div, r.record_id, gen);
@@ -1381,8 +1381,9 @@ function startPoll() {
       const r = await api('/api/v1/h5/record-status', { record_id: S.recordId });
       if (r.status === '成功') {
         stopPoll();
-        $('status').innerHTML = `✅ 处理完成：<a href="${r.output_video_url}" target="_blank">查看成片</a>`;
-        procBanner('ok', '处理完成！', r.output_video_url);
+        const dl = '/api/v1/h5/download?record_id=' + encodeURIComponent(S.recordId);
+        $('status').innerHTML = `✅ 处理完成：<a href="${dl}" target="_blank">查看成片</a>`;
+        procBanner('ok', '处理完成！', dl);
       } else if (r.status === '失败') {
         stopPoll();
         $('status').textContent = '❌ 处理失败：' + (r.error || '').slice(0, 160);

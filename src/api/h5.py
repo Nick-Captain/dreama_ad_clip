@@ -20,6 +20,7 @@ import uuid
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -579,6 +580,82 @@ async def api_assets():
         from tools.h5_store import list_assets
         return {"assets": list_assets()}
     return await asyncio.to_thread(_run)
+
+
+def _clean_download_name(output_url: str, fields: dict) -> str:
+    """从成片 URL 推导纯净下载名：取对象 key basename，去掉存储 SDK 强加的 _8位hash 后缀。
+    兜底用「创作日期-视频名」。"""
+    import re as _re
+    import datetime as _dt
+    from tools.bitable_tool import field_to_text
+    from tools.batch_tool import _ascii_name
+    base = os.path.basename(urlparse(output_url).path) or ""
+    clean = _re.sub(r"_[0-9a-fA-F]{8}(\.[A-Za-z0-9]+)$", r"\1", base)
+    if clean.lower().endswith(".mp4") and clean[0:1].isdigit():
+        return clean  # 形如 20260613-kkzmnq-pd.mp4，正是规范名去哈希
+    # 兜底：日期-视频名（如老记录的成片名不是规范 key）
+    cm = fields.get("创作日期")
+    ds = (_dt.datetime.fromtimestamp(cm / 1000).strftime("%Y%m%d")
+          if isinstance(cm, (int, float)) and cm else _dt.datetime.now().strftime("%Y%m%d"))
+    nm = _ascii_name(field_to_text(fields.get("视频名")).strip()) or "video"
+    return f"{ds}-{nm}.mp4"
+
+
+@router.get("/download")
+async def api_download(record_id: str = "", app_token: str = "", table_id: str = ""):
+    """成片下载代理：从我们后端流式转发，强制纯净下载名（去掉对象 key 的 _hash 后缀）。
+    扣子 SDK 的存储不支持上传时设 Content-Disposition，故只能在此 HTTP 响应层设置。"""
+    from urllib.parse import quote as _quote
+    import requests as _rq
+    if not record_id:
+        raise HTTPException(status_code=400, detail="record_id 必填")
+    _app = app_token or DEFAULT_APP_TOKEN
+    _tbl = table_id or DEFAULT_TABLE_ID
+    fields = await asyncio.to_thread(_fetch_record_fields, _app, _tbl, record_id)
+    from tools.bitable_tool import field_to_text
+    url = field_to_text(fields.get("输出视频URL")).strip()
+    if not url:
+        raise HTTPException(status_code=404, detail="该记录暂无成片")
+    name = _clean_download_name(url, fields)
+
+    resp = _rq.get(url, stream=True, timeout=120)
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"拉取成片失败: {e}")
+    headers = {
+        # filename= 给老浏览器（ASCII），filename*= 给现代浏览器（可含中文，已百分号编码）
+        "Content-Disposition": f"attachment; filename=\"{name}\"; filename*=UTF-8''{_quote(name)}",
+    }
+    cl = resp.headers.get("Content-Length")
+    if cl:
+        headers["Content-Length"] = cl
+    return StreamingResponse(resp.iter_content(chunk_size=65536), media_type="video/mp4", headers=headers)
+
+
+@router.post("/prewarm-tails")
+async def api_prewarm_tails(request: Request):
+    """预热内置尾帧：把每个内置尾帧在给定尺寸下规格化进持久缓存（h5_kv），
+    之后任何记录第一条都直接命中、不再付 ~50s 规格化。部署后调用一次即可。
+    body 可选 {"sizes": [[1080,1920],[1920,1080]]}，默认仅 1080x1920。"""
+    body = await _json_body(request) or {}
+    sizes = body.get("sizes") or [[1080, 1920]]
+
+    def _run():
+        from tools.video_pipeline import BUILTIN_TAILS, _prepare_tail_url
+        out = []
+        for tname, turl in BUILTIN_TAILS.items():
+            for wh in sizes:
+                try:
+                    w, h = int(wh[0]), int(wh[1])
+                    u = _prepare_tail_url(turl, w, h, tempfile.gettempdir(), uuid.uuid4().hex[:12])
+                    out.append({"tail": tname, "size": f"{w}x{h}", "ok": bool(u and u != turl)})
+                except Exception as e:
+                    out.append({"tail": tname, "size": str(wh), "ok": False, "error": str(e)[:200]})
+        return out
+
+    results = await asyncio.to_thread(_run)
+    return {"prewarmed": results}
 
 
 @router.post("/upload-video")

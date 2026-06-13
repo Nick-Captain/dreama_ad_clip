@@ -166,13 +166,26 @@ def _rename_output(final_url: str, video_name: str, created_ms, tail_name: str, 
         tmp = os.path.join(tempfile.gettempdir(), f"named_out_{uid}.mp4")
         _download_file(final_url, tmp)
         storage = _get_storage()
-        with open(tmp, "rb") as f:
-            key = storage.stream_upload_file(
-                fileobj=f,
-                file_name=f"ad_tail_output/{fname}",
-                content_type="video/mp4",
-                content_disposition=content_disposition,
-            )
+        obj_key = f"ad_tail_output/{fname}"
+
+        def _upload(with_cd: bool) -> str:
+            with open(tmp, "rb") as f:
+                return storage.stream_upload_file(
+                    fileobj=f,
+                    file_name=obj_key,
+                    content_type="video/mp4",
+                    content_disposition=(content_disposition if with_cd else None),
+                )
+
+        # 先带 Content-Disposition 上传（成功则下载得纯净名）；
+        # 若存储/代理不接受该参数而报错，退回不带 CD 的普通改名（至少恢复 ASCII 规范名）。
+        try:
+            key = _upload(with_cd=True)
+            logger.info(f"[批量处理] 成片改名成功（带 Content-Disposition）: {fname}")
+        except Exception as cd_err:
+            logger.warning(f"[批量处理] 带 Content-Disposition 上传失败，退回普通改名: {cd_err}")
+            key = _upload(with_cd=False)
+            logger.info(f"[批量处理] 成片改名成功（无 Content-Disposition，下载名仍带哈希后缀）: {fname}")
         try:
             os.remove(tmp)
         except Exception:

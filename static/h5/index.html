@@ -517,7 +517,7 @@ async function buildStage() {
   S.layerK.add(S.guideV); S.layerK.add(S.guideH);
   for (const layer of S.doc.layers) await addNode(layer);
   S.layerK.draw();
-  startAnim();
+  S.previewLid = null;
   renderChips();
   select(S.doc.layers[0] ? lid(S.doc.layers[0]) : '');
   S.stage.on('click tap', e => { if (e.target === S.stage || !e.target.getAttr('lid')) select(''); });
@@ -650,51 +650,61 @@ function syncBack(layer, node) {
   renderProps(); updateRotHandle();
 }
 
-const PREVIEW_PERIOD = 4;  // 入场/出场预览循环周期（秒）
-function startAnim() {
-  S.anim = new Konva.Animation(frame => {
-    const T = frame.time / 1000, tt = T % PREVIEW_PERIOD;
-    const W = S.stage.width(), H = S.stage.height();
-    for (const layer of S.doc.layers) {
-      const node = S.nodes.get(lid(layer));
-      if (!node) continue;
-      const ent = layer.entrance || {}, ext = layer.exit || {}, loop = layer.animation || {};
-      const base = layer.opacity ?? 1;
-      if (!ent.type && !ext.type && !loop.type) {
-        node.offsetX(0); node.offsetY(0); node.scaleX(1); node.scaleY(1); node.opacity(base);
-        continue;
-      }
-      let op = base, ox = 0, oy = 0, sx = 1;
-      const slide = (dir, amt) => {
-        const m = (dir === 'left' || dir === 'right') ? W * 0.28 : H * 0.28;
-        const s = (dir === 'left' || dir === 'up') ? -1 : 1;
-        if (dir === 'left' || dir === 'right') ox += s * m * amt; else oy += s * m * amt;
-      };
-      if (ent.type) {
-        const de = ent.duration || 0.5, k = Math.min(1, tt / de);
-        if (ent.type === 'fade') op = base * k;
-        else if (ent.type === 'zoom') sx = 0.3 + 0.7 * k;
-        else if (ent.type === 'slide') slide(ent.dir || 'down', 1 - k);
-      }
-      if (ext.type) {
-        const dd = ext.duration || 0.5, ke = Math.max(0, (tt - (PREVIEW_PERIOD - dd)) / dd);
-        if (ke > 0) {
-          if (ext.type === 'fade') op = base * (1 - ke);
-          else if (ext.type === 'zoom') sx = 1 - 0.7 * ke;
-          else if (ext.type === 'slide') slide(ext.dir || 'up', ke);
-        }
-      }
-      if (loop.type === 'shake') ox += -Math.sin(2 * Math.PI * (loop.speed || 1) * T) * W * (loop.amplitude || 0.012);
-      if (loop.type === 'float') oy += -Math.sin(2 * Math.PI * (loop.speed || 0.8) * T) * H * (loop.amplitude || 0.018);
-      if (loop.type === 'blink') { const per = 1 / (loop.speed || 1.1); op = (T % per) < per * 0.6 ? base : base * 0.2; }
-      node.opacity(op);
-      node.scaleX(sx); node.scaleY(sx);
-      const inv = sx ? 1 / sx : 1;  // offset 是局部坐标(随 scale 缩放)：缩放居中补偿 + 位移折算
-      node.offsetX((node.width() / 2) * (1 - inv) - ox * inv);
-      node.offsetY((node.height() / 2) * (1 - inv) - oy * inv);
-    }
-  }, S.layerK);
+// 把节点复位到静止状态（动画结束/取消后）
+function resetNode(node, layer) {
+  node.offsetX(0); node.offsetY(0); node.scaleX(1); node.scaleY(1); node.opacity(layer.opacity ?? 1);
+}
+// 一次性预览某图层的入场→停留→出场（循环类播放数秒）；不再持续重复
+function playPreview(layer) {
+  if (!layer) return;
+  const node = S.nodes.get(lid(layer));
+  if (!node) return;
+  // 复位上一个预览的图层
+  if (S.previewLid && S.previewLid !== lid(layer)) {
+    const pl = S.doc.layers.find(l => lid(l) === S.previewLid), pn = pl && S.nodes.get(S.previewLid);
+    if (pl && pn) resetNode(pn, pl);
+  }
+  if (S.anim) S.anim.stop();
+  const ent = layer.entrance || {}, ext = layer.exit || {}, loop = layer.animation || {};
+  if (!ent.type && !ext.type && !loop.type) { resetNode(node, layer); S.previewLid = null; S.layerK.batchDraw(); return; }
+  S.previewLid = lid(layer); S.previewT0 = null;
+  const de = ent.type ? (ent.duration || 0.5) : 0, dx = ext.type ? (ext.duration || 0.5) : 0;
+  let dur = de + dx + ((de || dx) ? 0.6 : 0);
+  if (loop.type) dur = Math.max(dur, 2.6);
+  S.previewDur = dur || 1;
+  if (!S.anim) S.anim = new Konva.Animation(previewFrame, S.layerK);
   S.anim.start();
+}
+function previewFrame(frame) {
+  const layer = S.doc.layers.find(l => lid(l) === S.previewLid);
+  const node = layer && S.nodes.get(S.previewLid);
+  if (!layer || !node) { if (S.anim) S.anim.stop(); return; }
+  if (S.previewT0 == null) S.previewT0 = frame.time;
+  const t = (frame.time - S.previewT0) / 1000;
+  if (t >= S.previewDur) { resetNode(node, layer); S.anim.stop(); S.previewLid = null; S.layerK.batchDraw(); updateRotHandle(); return; }
+  const W = S.stage.width(), H = S.stage.height(), base = layer.opacity ?? 1;
+  const ent = layer.entrance || {}, ext = layer.exit || {}, loop = layer.animation || {};
+  const de = ent.type ? (ent.duration || 0.5) : 0, dx = ext.type ? (ext.duration || 0.5) : 0;
+  let op = base, ox = 0, oy = 0, sx = 1;
+  const slide = (dir, amt) => {
+    const m = (dir === 'left' || dir === 'right') ? W * 0.28 : H * 0.28, s = (dir === 'left' || dir === 'up') ? -1 : 1;
+    if (dir === 'left' || dir === 'right') ox += s * m * amt; else oy += s * m * amt;
+  };
+  if (ent.type) {
+    const k = Math.min(1, de ? t / de : 1);
+    if (ent.type === 'fade') op = base * k; else if (ent.type === 'zoom') sx = 0.3 + 0.7 * k; else if (ent.type === 'slide') slide(ent.dir || 'down', 1 - k);
+  }
+  if (ext.type) {
+    const ke = Math.max(0, dx ? (t - (S.previewDur - dx)) / dx : 0);
+    if (ke > 0) { if (ext.type === 'fade') op = base * (1 - ke); else if (ext.type === 'zoom') sx = 1 - 0.7 * ke; else if (ext.type === 'slide') slide(ext.dir || 'up', ke); }
+  }
+  if (loop.type === 'shake') ox += -Math.sin(2 * Math.PI * (loop.speed || 1) * t) * W * (loop.amplitude || 0.012);
+  if (loop.type === 'float') oy += -Math.sin(2 * Math.PI * (loop.speed || 0.8) * t) * H * (loop.amplitude || 0.018);
+  if (loop.type === 'blink') { const per = 1 / (loop.speed || 1.1); op = (t % per) < per * 0.6 ? base : base * 0.2; }
+  node.opacity(op); node.scaleX(sx); node.scaleY(sx);
+  const inv = sx ? 1 / sx : 1;
+  node.offsetX((node.width() / 2) * (1 - inv) - ox * inv);
+  node.offsetY((node.height() / 2) * (1 - inv) - oy * inv);
 }
 
 /* ---------- 图层选择与属性面板 ---------- */
@@ -855,7 +865,7 @@ function appendEnterExit(p, layer, key, label, typeNames, defDir) {
   });
   sel.onchange = () => {
     layer[key] = sel.value ? { type: sel.value, duration: cur.duration ?? 0.5, dir: cur.dir || defDir } : null;
-    renderProps();
+    renderProps(); playPreview(layer);
   };
   r.appendChild(sel); p.appendChild(r);
   if (cur.type === 'slide') {
@@ -879,7 +889,7 @@ function appendLoop(p, layer) {
     const o = document.createElement('option'); o.value = v; o.textContent = t;
     if ((layer.animation?.type || '') === v) o.selected = true; sel.appendChild(o);
   });
-  sel.onchange = () => { layer.animation = sel.value ? { type: sel.value } : null; renderProps(); };
+  sel.onchange = () => { layer.animation = sel.value ? { type: sel.value } : null; renderProps(); playPreview(layer); };
   animSel.appendChild(sel); p.appendChild(animSel);
   const at = layer.animation?.type;
   if (at === 'shake' || at === 'float') {
@@ -895,7 +905,10 @@ function appendLoop(p, layer) {
 
 function appendAnimControls(p, layer) {
   const sub = document.createElement('div'); sub.className = 'subcard';
-  sub.innerHTML = '<span class="tt">动画</span>';
+  const head = row('<span class="tt" style="flex:1">动画</span>');
+  const pv = document.createElement('button'); pv.textContent = '▶ 预览'; pv.style.cssText = 'padding:3px 10px';
+  pv.onclick = () => playPreview(layer);
+  head.appendChild(pv); sub.appendChild(head);
   p.appendChild(sub);
   appendEnterExit(sub, layer, 'entrance', '入场', { '': '无', 'fade': '渐显', 'slide': '滑入', 'zoom': '放大' }, 'down');
   appendEnterExit(sub, layer, 'exit', '出场', { '': '无', 'fade': '渐隐', 'slide': '滑出', 'zoom': '缩小' }, 'up');
@@ -1036,7 +1049,8 @@ function renderProps() {
   }));
   p.appendChild(sh);
 
-  if (layer.type !== 'guide_subtitle') { appendAnimControls(p, layer); p.appendChild(timingRow(layer)); }
+  appendAnimControls(p, layer);
+  if (layer.type !== 'guide_subtitle') p.appendChild(timingRow(layer));
 }
 
 function timingRow(layer) {

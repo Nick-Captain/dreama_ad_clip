@@ -547,7 +547,8 @@ def _generate_freeze_video_from_plan(
             pf_label = f"[pf{idx}]"
             filter_parts.append(f"{ov_in}{prefilter}{pf_label}")
             ov_in = pf_label
-        opts = f"x={spec.x_expr}:y={spec.y_expr}"
+        # x/y 表达式可能含逗号(min/max)，必须单引号包裹，否则被当成滤镜分隔符
+        opts = f"x='{spec.x_expr}':y='{spec.y_expr}'"
         if spec.enable_expr:
             opts += f":enable='{spec.enable_expr}'"
         out_label = f"[v{idx}]"

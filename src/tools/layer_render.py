@@ -213,24 +213,27 @@ def _has_motion(layer: dict) -> bool:
                 or (layer.get("exit") or {}).get("type"))
 
 
-def _build_overlay_motion(layer: dict, cx: float, cy: float, seg_dur: float, canvas_w: int, canvas_h: int):
+def _build_overlay_motion(layer: dict, cx: float, cy: float, seg_dur: float, canvas_w: int, canvas_h: int, t0: float = 0.0):
     """入场/出场/循环 → 居中叠加的 (x_expr, y_expr, enable_expr, prefilter)。
-    以 (cx,cy) 为叠加图中心，借 overlay 的 w/h 变量自动居中（兼容缩放）。"""
+    以 (cx,cy) 为叠加图中心，借 overlay 的 w/h 变量自动居中（兼容缩放）。
+    t0：该图层所在片段的起始时刻（引导语分段时入场/出场相对段起算）。"""
     ent = layer.get("entrance") or {}
     ext = layer.get("exit") or {}
     loop = layer.get("animation") or {}
     D = max(0.1, float(seg_dur or 0.1))
+    t0 = max(0.0, float(t0 or 0.0))
+    tv = "t" if t0 <= 0 else f"(t-{t0:.3f})"  # 相对段起的时间
     x_terms = [f"({cx:.1f}-w/2)"]
     y_terms = [f"({cy:.1f}-h/2)"]
     prefilters = ["format=rgba"]
     enables = []
 
-    # 入场/出场 淡入淡出（alpha 滤镜）
+    # 入场/出场 淡入淡出（alpha 滤镜，st 为绝对时间）
     if ent.get("type") == "fade":
-        prefilters.append(f"fade=t=in:st=0:d={_anim_dur(ent):.3f}:alpha=1")
+        prefilters.append(f"fade=t=in:st={t0:.3f}:d={_anim_dur(ent):.3f}:alpha=1")
     if ext.get("type") == "fade":
         dx = _anim_dur(ext)
-        prefilters.append(f"fade=t=out:st={max(0, D - dx):.3f}:d={dx:.3f}:alpha=1")
+        prefilters.append(f"fade=t=out:st={t0 + max(0, D - dx):.3f}:d={dx:.3f}:alpha=1")
 
     # 入场/出场 滑动（位移）
     offH, offV = int(canvas_w * 0.28), int(canvas_h * 0.28)
@@ -239,7 +242,7 @@ def _build_overlay_motion(layer: dict, cx: float, cy: float, seg_dur: float, can
         d = spec.get("dir", "down" if entering else "up")
         dur = _anim_dur(spec)
         coef = (offH if d in ("left", "right") else offV) * (-1 if d in ("left", "up") else 1)
-        k = f"(1-min(1,t/{dur:.3f}))" if entering else f"max(0,(t-{max(0, D - dur):.3f})/{dur:.3f})"
+        k = f"(1-min(1,{tv}/{dur:.3f}))" if entering else f"max(0,({tv}-{max(0, D - dur):.3f})/{dur:.3f})"
         return ("x" if d in ("left", "right") else "y"), f"{coef}*{k}"
 
     if ent.get("type") == "slide":
@@ -250,10 +253,10 @@ def _build_overlay_motion(layer: dict, cx: float, cy: float, seg_dur: float, can
     # 入场/出场 缩放（scale eval=frame；overlay 用 w/h 自动重新居中）
     zoom = []
     if ent.get("type") == "zoom":
-        zoom.append(f"(0.3+0.7*min(1,t/{_anim_dur(ent):.3f}))")
+        zoom.append(f"(0.3+0.7*min(1,{tv}/{_anim_dur(ent):.3f}))")
     if ext.get("type") == "zoom":
         dx = _anim_dur(ext)
-        zoom.append(f"(1-0.7*max(0,(t-{max(0, D - dx):.3f})/{dx:.3f}))")
+        zoom.append(f"(1-0.7*max(0,({tv}-{max(0, D - dx):.3f})/{dx:.3f}))")
     if zoom:
         fexpr = "*".join(zoom)
         prefilters.append(f"scale=w='iw*{fexpr}':h='ih*{fexpr}':eval=frame")
@@ -464,12 +467,15 @@ def build_freeze_render_plan(
 
         if ltype == "guide_subtitle":
             for i, seg_text in enumerate(subtitle_segments):
-                seg_img = render_text_canvas(canvas_w, canvas_h, seg_text, layer, font_path)
-                path = _save_overlay(seg_img, f"guide{i}")
                 start, end = bounds[i] if i < len(bounds) else (0.0, cursor)
+                img, cx, cy = render_text_tight(canvas_w, canvas_h, seg_text, layer, font_path)
+                path = _save_overlay(img, f"guide{i}")
+                x_expr, y_expr, anim_en, prefilter = _build_overlay_motion(
+                    layer, cx, cy, end - start, canvas_w, canvas_h, t0=start)
+                seg_en = f"between(t,{start:.3f},{end:.3f})"
                 overlays.append(OverlaySpec(
-                    path=path, x_expr="0", y_expr="0",
-                    enable_expr=f"between(t,{start:.3f},{end:.3f})",
+                    path=path, x_expr=x_expr, y_expr=y_expr,
+                    enable_expr=_combine_enable(seg_en, anim_en), prefilter=prefilter, cx=cx, cy=cy,
                 ))
             continue
 

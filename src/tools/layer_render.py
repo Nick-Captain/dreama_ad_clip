@@ -338,58 +338,6 @@ def render_static_preview(
     return output_path
 
 
-def render_overlay_group(
-    canvas_w: int,
-    canvas_h: int,
-    layer_doc: dict,
-    layer_context: dict | None,
-    search_box_image_url: str,
-    guide_text: str,
-    font_path: str,
-    out_path: str,
-) -> str:
-    """把所有可见图层静态拍平到一张透明 PNG（黑屏渐显模式用：整组一次性渐显，引导语整句显示）。"""
-    base = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-    for layer in layer_doc.get("layers", []):
-        if not layer.get("visible", True):
-            continue
-        ltype = layer.get("type", "")
-        if ltype == "search_box":
-            if not search_box_image_url:
-                continue
-            try:
-                sb = _download_image(search_box_image_url)
-            except Exception:
-                continue
-            tw = max(1, int(canvas_w * float(layer.get("scale", 0.7) or 0.7)))
-            th = max(1, int(sb.height * tw / sb.width))
-            sb = _rotate_expand(_apply_opacity(sb.resize((tw, th), Image.Resampling.LANCZOS), layer), layer)
-            cx = canvas_w * float(layer.get("x", 0.5) or 0.5)
-            cy = canvas_h * float(layer.get("y", 0.18) or 0.18)
-            base.paste(sb, (int(cx - sb.width / 2), int(cy - sb.height / 2)), sb)
-        elif ltype == "image":
-            url = (layer.get("url") or "").strip()
-            if not url:
-                continue
-            try:
-                im = _download_image(url)
-            except Exception:
-                continue
-            tw = max(1, int(canvas_w * float(layer.get("scale", 0.2) or 0.2)))
-            th = max(1, int(im.height * tw / im.width))
-            im = _rotate_expand(_apply_opacity(im.resize((tw, th), Image.Resampling.LANCZOS), layer), layer)
-            cx = canvas_w * float(layer.get("x", 0.5) or 0.5)
-            cy = canvas_h * float(layer.get("y", 0.5) or 0.5)
-            base.paste(im, (int(cx - im.width / 2), int(cy - im.height / 2)), im)
-        elif ltype in ("text", "guide_subtitle"):
-            txt = guide_text if ltype == "guide_subtitle" else resolve_layer_text(layer, layer_context)
-            if not txt:
-                continue
-            base = Image.alpha_composite(base, render_text_canvas(canvas_w, canvas_h, txt, layer, font_path))
-    base.save(out_path, "PNG")
-    return out_path
-
-
 def build_freeze_render_plan(
     frame_path: str,
     canvas_w: int,
@@ -402,27 +350,34 @@ def build_freeze_render_plan(
     font_path: str,
     tmp_dir: str,
     uid: str,
+    transparent_base: bool = False,
+    base_t0: float = 0.0,
 ) -> FreezeRenderPlan:
     """
     输入图层文档与素材，输出：
-    - base_path: 拍平了所有静态全程图层的底图 PNG
+    - base_path: 拍平了所有静态全程图层的底图 PNG（透明模式=只含静态层的透明 PNG）
     - overlays:  动画/分段显示图层的 OverlaySpec 列表（z 序同图层顺序）
+
+    transparent_base=True：底图为透明（叠加到视频上而非静态帧，用于「黑屏渐显」）。
+    base_t0：所有时间（分段窗口、入场/出场起点）整体偏移这么多秒（黑屏渐显叠加在视频末段）。
     """
-    base = Image.open(frame_path).convert("RGBA")
-    # 抽出的帧若带旋转元数据（手机竖拍常见），ffmpeg 自动旋转后的实际像素尺寸
-    # 会与 ffprobe 探测到的编码尺寸（video_w/h）宽高互换。一律以底图实际尺寸为准，
-    # 否则全画布文字图层与 base 尺寸不一致会导致 alpha_composite「images do not match」。
-    canvas_w, canvas_h = base.size
+    if transparent_base:
+        base = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    else:
+        base = Image.open(frame_path).convert("RGBA")
+        # 抽出的帧若带旋转元数据（手机竖拍常见），ffmpeg 自动旋转后实际像素尺寸会与编码尺寸
+        # 宽高互换。一律以底图实际尺寸为准，否则全画布文字图层与 base 尺寸不一致会报错。
+        canvas_w, canvas_h = base.size
     overlays: list = []
     overlay_idx = 0
 
     bounds = []
-    cursor = 0.0
+    cursor = float(base_t0 or 0.0)
     for dur in segment_durations:
         bounds.append((cursor, cursor + dur))
         cursor += dur
 
-    total_dur = cursor if cursor > 0 else 1.0
+    total_dur = cursor if cursor > base_t0 else (base_t0 + 1.0)
 
     def _save_overlay(img: Image.Image, tag: str) -> str:
         nonlocal overlay_idx
@@ -433,10 +388,14 @@ def build_freeze_render_plan(
 
     def _motion_overlay(img: Image.Image, cx: float, cy: float, tag: str, seg_enable):
         path = _save_overlay(img, tag)
-        x_expr, y_expr, anim_en, prefilter = _build_overlay_motion(layer, cx, cy, total_dur, canvas_w, canvas_h)
+        win = max(0.1, total_dur - base_t0)  # 该图层动画窗口长度
+        x_expr, y_expr, anim_en, prefilter = _build_overlay_motion(layer, cx, cy, win, canvas_w, canvas_h, t0=base_t0)
+        enable = _combine_enable(seg_enable, anim_en)
+        if transparent_base and base_t0 > 0:  # 黑屏渐显：图层仅在末段窗口显示
+            enable = _combine_enable(f"gte(t,{base_t0:.3f})", enable)
         overlays.append(OverlaySpec(
             path=path, x_expr=x_expr, y_expr=y_expr,
-            enable_expr=_combine_enable(seg_enable, anim_en), prefilter=prefilter, cx=cx, cy=cy,
+            enable_expr=enable, prefilter=prefilter, cx=cx, cy=cy,
         ))
 
     for layer in layer_doc.get("layers", []):
@@ -517,5 +476,8 @@ def build_freeze_render_plan(
         logger.warning(f"[{uid}] 未知图层类型已忽略: {ltype}")
 
     base_path = os.path.join(tmp_dir, f"freeze_base_{uid}.png")
-    base.convert("RGB").save(base_path, "PNG")
+    if transparent_base:
+        base.save(base_path, "PNG")  # 保留 alpha，叠加到视频上
+    else:
+        base.convert("RGB").save(base_path, "PNG")
     return FreezeRenderPlan(base_path=base_path, overlays=overlays)

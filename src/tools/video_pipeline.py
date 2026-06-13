@@ -586,26 +586,33 @@ def _generate_freeze_video_from_plan(
     return output_path
 
 
-def _generate_fadein_over_video(video_local: str, group_png: str, fade_seconds: float, output_path: str, uid: str) -> str:
-    """黑屏渐显模式：把图层组以渐显方式叠加到用户视频末尾 fade_seconds 秒（无配音、无中间帧）。"""
+def _generate_overlays_over_video(video_local: str, plan, base_t0: float, output_path: str, uid: str) -> str:
+    """黑屏渐显：把图层（静态底图 + 各自动画 overlay）叠加到用户视频末段（无配音、无中间帧）。
+    plan: 由 build_freeze_render_plan(transparent_base=True, base_t0=...) 生成。"""
     dur = _get_video_duration(video_local)
-    st = max(0.0, dur - float(fade_seconds or 4.0))
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_local,
-        "-loop", "1", "-i", group_png,
-        "-filter_complex",
-        (
-            f"[1:v]format=rgba,fade=t=in:st={st:.3f}:d={float(fade_seconds or 4.0):.3f}:alpha=1[g];"
-            f"[0:v][g]overlay=0:0:enable='gte(t,{st:.3f})'[v]"
-        ),
-        "-map", "[v]", "-map", "0:a?",
+    cmd = ["ffmpeg", "-y", "-i", video_local, "-loop", "1", "-i", plan.base_path]
+    for spec in plan.overlays:
+        cmd += ["-loop", "1", "-i", spec.path]
+    en0 = f":enable='gte(t,{base_t0:.3f})'" if base_t0 > 0 else ""
+    filter_parts = ["[0:v]fps=30[bv]", f"[bv][1:v]overlay=0:0{en0}[s0]"]
+    last = "[s0]"
+    for idx, spec in enumerate(plan.overlays):
+        ov_in = f"[{idx + 2}:v]"
+        if getattr(spec, "prefilter", None):
+            filter_parts.append(f"{ov_in}{spec.prefilter}[pf{idx}]"); ov_in = f"[pf{idx}]"
+        opts = f"x='{spec.x_expr}':y='{spec.y_expr}'"
+        if spec.enable_expr:
+            opts += f":enable='{spec.enable_expr}'"
+        filter_parts.append(f"{last}{ov_in}overlay={opts}[o{idx}]"); last = f"[o{idx}]"
+    cmd += [
+        "-filter_complex", ";".join(filter_parts),
+        "-map", last, "-map", "0:a?",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",
         "-t", str(dur), "-shortest",
         output_path,
     ]
-    logger.info(f"[{uid}] 黑屏渐显合成: 视频时长={dur:.2f}s, 末段渐显 st={st:.2f}s d={fade_seconds}s")
+    logger.info(f"[{uid}] 黑屏渐显合成: 视频时长={dur:.2f}s, 末段起点={base_t0:.2f}s, overlay {len(plan.overlays)} 个")
     try:
         with _HEAVY_FFMPEG_SEMAPHORE:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -765,9 +772,9 @@ def process_video_pipeline(
     video_w, video_h = _get_video_resolution(video_url)
     logger.info(f"[{uid}] 原视频分辨率: {video_w}x{video_h}")
 
-    # ===== 黑屏渐显模式：无中间帧、无配音，在用户视频末段渐显图层后直接拼接尾帧 =====
+    # ===== 黑屏渐显模式：无中间帧、无配音；图层逐个叠加到用户视频末段、各自动画生效 =====
     if frame_mode == "黑屏渐显":
-        from tools.layer_render import render_overlay_group
+        from tools.layer_render import build_freeze_render_plan
         from tools.layer_model import resolve_layer_doc as _resolve_doc
         # 取显示尺寸（带旋转视频的实际像素），抽一帧量尺寸
         probe_frame = os.path.join(tmp_dir, f"dim_{uid}.png")
@@ -781,11 +788,21 @@ def process_video_pipeline(
             except Exception:
                 pass
         _doc = style_layers if (isinstance(style_layers, dict) and style_layers.get("layers")) else _resolve_doc()
-        group_png = os.path.join(tmp_dir, f"group_{uid}.png")
-        render_overlay_group(cw, ch, _doc, layer_context or {}, (search_box_image_url or "").strip(),
-                             guide_text or DEFAULT_GUIDE_TEXT, _find_chinese_font(), group_png)
+        v_dur = _get_video_duration(tmp_video)
+        win = float(fade_seconds or 4.0)
+        start = max(0.0, v_dur - win)
+        # 字幕分段（去标点、≤12字，与其它模式一致），无配音故时长平均分配
+        segs = _split_subtitle(subtitle_text or guide_text or DEFAULT_GUIDE_TEXT)
+        k = max(1, len(segs))
+        seg_durs = [(v_dur - start) / k] * k
+        plan = build_freeze_render_plan(
+            frame_path="", canvas_w=cw, canvas_h=ch, layer_doc=_doc,
+            layer_context=layer_context or {}, search_box_image_url=(search_box_image_url or "").strip(),
+            subtitle_segments=segs, segment_durations=seg_durs, font_path=_find_chinese_font(),
+            tmp_dir=tmp_dir, uid=uid, transparent_base=True, base_t0=start,
+        )
         fadein_local = os.path.join(tmp_dir, f"fadein_{uid}.mp4")
-        _generate_fadein_over_video(tmp_video, group_png, fade_seconds, fadein_local, uid)
+        _generate_overlays_over_video(tmp_video, plan, start, fadein_local, uid)
         main_url = _upload_video_to_s3(fadein_local, f"temp/fadein_{uid}.mp4")
         if tail_custom_url and tail_custom_url.strip():
             tail_url = tail_custom_url.strip()
@@ -794,7 +811,7 @@ def process_video_pipeline(
             if not tail_url:
                 raise ValueError(f"未找到内置尾帧「{tail_name}」，可选：{list(BUILTIN_TAILS.keys())}")
         t2_id = TRANSITION_OPTIONS.get(transition2_name)
-        logger.info(f"[{uid}] 黑屏渐显拼接: [渐显视频, 尾帧] 转场2={transition2_name}({t2_id})")
+        logger.info(f"[{uid}] 黑屏渐显拼接: [末段视频, 尾帧] 转场2={transition2_name}({t2_id})")
         concat_resp = VideoEditClient(ctx=ctx).concat_videos(
             videos=[main_url, tail_url], transitions=[t2_id] if t2_id else None)
         final_video_url = concat_resp.url
@@ -804,12 +821,11 @@ def process_video_pipeline(
             _mix_bgm(final_video_url, bgm_url.strip(), bgm_volume, bgm_out, uid,
                      fade_in=bgm_fade_in, fade_out=bgm_fade_out)
             final_video_url = _upload_video_to_s3(bgm_out, f"temp/final_bgm_{uid}.mp4")
-            for p in (bgm_out,):
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
-        for p in (tmp_video, group_png, fadein_local):
+            try:
+                os.remove(bgm_out)
+            except Exception:
+                pass
+        for p in [tmp_video, fadein_local, plan.base_path] + [s.path for s in plan.overlays]:
             try:
                 os.remove(p)
             except Exception:

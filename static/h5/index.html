@@ -102,6 +102,8 @@ body.dragging { user-select: none; -webkit-user-select: none; }
 #settings-panel { flex: none; width: 286px; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 86px); overflow: auto; }
 #settings-panel .props { gap: 9px; }
 #settings-panel .ptitle { font-weight: 600; }
+.ttip { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--muted); color: var(--muted); font-size: 10px; font-style: italic; cursor: help; flex: none; margin-left: 4px; }
+.ttip:hover { border-color: var(--brand); color: var(--brand); }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .chip {
   font-size: 12px; padding: 5px 11px; border-radius: 9px; background: var(--card);
@@ -1148,14 +1150,14 @@ function renderVideoSettings() {
   const modeNote = row('<span class="muted"></span>');
   body.appendChild(modeNote);
   let fadeSec = s.fade_seconds != null ? s.fade_seconds : 4;
-  const fadeRow = sliderRow('渐显时长', 2, 8, 0.5, fadeSec, v => v + 's', v => fadeSec = v);
+  const fadeRow = sliderRow('末段时长', 2, 8, 0.5, fadeSec, v => v + 's', v => fadeSec = v);
   body.appendChild(fadeRow);
   const syncMode = () => {
     const m = modeSel.value;
     modeNote.querySelector('span').textContent =
       m === '标准' ? '末尾无字幕、非黑屏：直接用最后一帧' :
       m === '去字幕' ? '末尾有字幕：AI 去除后做中间帧' :
-      '末尾渐隐黑屏：无中间帧无配音，末段渐显图层';
+      '末尾渐隐黑屏：无中间帧无配音，图层在末段显示（动画自行在图层里设）';
     fadeRow.style.display = m === '黑屏渐显' ? '' : 'none';
   };
   modeSel.onchange = syncMode; syncMode();
@@ -1175,9 +1177,11 @@ function renderVideoSettings() {
   const voiceSel = selOf(o.voices, s.voice_name || (o.voices || [])[0]);
   voiceRow.appendChild(voiceSel); body.appendChild(voiceRow);
   // 转场
-  const t1Row = row('<label>转场1</label>'); const t1 = selOf(o.transitions, s.transition1 || (o.transitions || [])[0]); t1Row.appendChild(t1); body.appendChild(t1Row);
+  const TRANS_TIP = '转场由云端服务渲染，不稳定时会不生效（退化为无转场）';
+  const infoIcon = () => { const i = document.createElement('span'); i.className = 'ttip'; i.textContent = 'i'; i.title = TRANS_TIP; return i; };
+  const t1Row = row('<label>转场1</label>'); const t1 = selOf(o.transitions, s.transition1 || (o.transitions || [])[0]); t1Row.appendChild(t1); t1Row.appendChild(infoIcon()); body.appendChild(t1Row);
   body.appendChild(row('<span class="muted">转场1：用户视频 → 定格帧</span>'));
-  const t2Row = row('<label>转场2</label>'); const t2 = selOf(o.transitions, s.transition2 || (o.transitions || [])[0]); t2Row.appendChild(t2); body.appendChild(t2Row);
+  const t2Row = row('<label>转场2</label>'); const t2 = selOf(o.transitions, s.transition2 || (o.transitions || [])[0]); t2Row.appendChild(t2); t2Row.appendChild(infoIcon()); body.appendChild(t2Row);
   body.appendChild(row('<span class="muted">转场2：定格帧 → 广告尾帧</span>'));
   // BGM
   const bgmCard = document.createElement('div'); bgmCard.className = 'subcard'; bgmCard.innerHTML = '<span class="tt">背景音乐 BGM</span>'; body.appendChild(bgmCard);

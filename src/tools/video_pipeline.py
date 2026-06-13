@@ -617,27 +617,94 @@ def _normalize_tail(tail_url: str, target_w: int, target_h: int, output_path: st
     return output_path
 
 
+def _tailnorm_kv_get(kv_key: str) -> Optional[str]:
+    """从 h5_kv 读规格化尾帧的对象 key（跨实例/重启持久）。"""
+    try:
+        from storage.database.db import get_session
+        from storage.database.shared.model import H5KeyValue
+        session = get_session()
+        try:
+            row = session.get(H5KeyValue, kv_key)
+            if row and isinstance(row.value, dict):
+                return row.value.get("obj_key")
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning(f"尾帧持久缓存读取失败: {e}")
+    return None
+
+
+def _tailnorm_kv_set(kv_key: str, obj_key: str) -> None:
+    try:
+        from storage.database.db import get_session
+        from storage.database.shared.model import H5KeyValue
+        session = get_session()
+        try:
+            row = session.get(H5KeyValue, kv_key)
+            if row is None:
+                session.add(H5KeyValue(key=kv_key, value={"obj_key": obj_key}))
+            else:
+                row.value = {"obj_key": obj_key}
+            session.commit()
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning(f"尾帧持久缓存写入失败: {e}")
+
+
 def _prepare_tail_url(tail_url: str, target_w: int, target_h: int, tmp_dir: str, uid: str) -> str:
     """规格化尾帧并上传，返回新URL；失败则返回原URL（至少不阻断出片）。
-    按 (tail_url, w, h) 进程级缓存：批内同尾帧只重编码一次。"""
+    缓存策略（消除每条 ~50s 的重复重编码）：
+      1) 进程内缓存(_TAIL_NORM_CACHE)：批内/热实例同尾帧零成本；
+      2) 持久缓存(h5_kv)：跨实例/重启仍命中，同一(尾帧,尺寸)全局只重编码一次。
+    缓存里存对象 key（非预签名URL，URL会过期），命中时重新签发 URL。"""
+    import hashlib
     cache_key = (tail_url, target_w, target_h)
+    storage = _get_storage()
+
+    def _url_from_key(obj_key: str) -> str:
+        return storage.generate_presigned_url(key=obj_key, expire_time=2592000)
+
+    # 1) 进程内缓存
     with _TAIL_NORM_LOCK:
-        cached = _TAIL_NORM_CACHE.get(cache_key)
-    if cached:
-        logger.info(f"[{uid}] 尾帧规格化命中缓存 {target_w}x{target_h}，跳过重编码")
-        return cached
+        mem_key = _TAIL_NORM_CACHE.get(cache_key)
+    if mem_key:
+        try:
+            logger.info(f"[{uid}] 尾帧规格化命中进程缓存 {target_w}x{target_h}")
+            return _url_from_key(mem_key)
+        except Exception:
+            pass  # 签发失败则继续往下重算
+
+    # 2) 持久缓存 h5_kv
+    kv_key = "tailnorm:v1:" + hashlib.md5(
+        f"{tail_url}|{target_w}|{target_h}".encode("utf-8")).hexdigest()[:20]
+    persist_key = _tailnorm_kv_get(kv_key)
+    if persist_key:
+        try:
+            url = _url_from_key(persist_key)
+            with _TAIL_NORM_LOCK:
+                _TAIL_NORM_CACHE[cache_key] = persist_key
+            logger.info(f"[{uid}] 尾帧规格化命中持久缓存(h5_kv)，跳过重编码")
+            return url
+        except Exception as e:
+            logger.warning(f"[{uid}] 持久缓存尾帧URL签发失败，将重算: {e}")
+
+    # 3) 重算（下载+重编码+上传），结果写两级缓存
     try:
         norm = os.path.join(tmp_dir, f"tailn_{uid}.mp4")
-        # 计算不持锁：避免阻塞其它记录的缓存读取；最坏情况批首几条重复编码一次，可接受
         _normalize_tail(tail_url, target_w, target_h, norm, uid)
-        url = _upload_video_to_s3(norm, f"temp/tailn_{uid}.mp4")
+        with open(norm, "rb") as f:
+            obj_key = storage.stream_upload_file(
+                fileobj=f, file_name=f"tail_normalized/{uid}.mp4", content_type="video/mp4")
         try:
             os.remove(norm)
         except Exception:
             pass
+        url = _url_from_key(obj_key)
         with _TAIL_NORM_LOCK:
-            _TAIL_NORM_CACHE[cache_key] = url
-        logger.info(f"[{uid}] 尾帧已规格化为 {target_w}x{target_h} H.264/30fps（已缓存）")
+            _TAIL_NORM_CACHE[cache_key] = obj_key
+        _tailnorm_kv_set(kv_key, obj_key)
+        logger.info(f"[{uid}] 尾帧已规格化为 {target_w}x{target_h} H.264/30fps（已写持久缓存）")
         return url
     except Exception as e:
         logger.warning(f"[{uid}] 尾帧规格化失败，用原尾帧（转场可能不生效）: {e}")

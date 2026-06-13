@@ -14,6 +14,7 @@ import os
 import json
 import logging
 import math
+import time
 import tempfile
 import threading
 import uuid
@@ -820,6 +821,16 @@ def process_video_pipeline(
     tmp_dir = tempfile.gettempdir()
     uid = uuid.uuid4().hex[:12]
 
+    # 诊断采集：扣子运行时拿不到日志，把每步耗时/关键中间结果回写表格「调试信息」列。
+    _t0 = time.time()
+    _t_last = [_t0]
+    diag = [f"uid={uid}"]
+
+    def _mark(msg: str):
+        now = time.time()
+        diag.append(f"+{now - _t0:5.1f}s (Δ{now - _t_last[0]:4.1f}s) {msg}")
+        _t_last[0] = now
+
     logger.info(f"[{uid}] 开始处理视频: {video_url}")
 
     # Step 0: 下载用户视频，检测分辨率，重新上传到自有S3
@@ -828,6 +839,7 @@ def process_video_pipeline(
     _download_file(video_url, tmp_video)
     video_w, video_h = _video_resolution_of_file(tmp_video)  # 复用已下载文件，避免整片二次下载
     logger.info(f"[{uid}] 原视频分辨率: {video_w}x{video_h}")
+    _mark(f"Step0 视频下载+分辨率 {video_w}x{video_h} 模式={frame_mode}")
 
     # ===== 黑屏渐显模式：无中间帧、无配音；图层逐个叠加到用户视频末段、各自动画生效 =====
     if frame_mode == "黑屏渐显":
@@ -858,21 +870,26 @@ def process_video_pipeline(
             subtitle_segments=segs, segment_durations=seg_durs, font_path=_find_chinese_font(),
             tmp_dir=tmp_dir, uid=uid, transparent_base=True, base_t0=start,
         )
+        _mark(f"黑屏渐显 抽帧+图层plan(overlay {len(plan.overlays)})")
         fadein_local = os.path.join(tmp_dir, f"fadein_{uid}.mp4")
         _generate_overlays_over_video(tmp_video, plan, start, fadein_local, uid)
         main_url = _upload_video_to_s3(fadein_local, f"temp/fadein_{uid}.mp4")
+        _mark("末段叠加视频生成+上传")
         if tail_custom_url and tail_custom_url.strip():
             tail_url = tail_custom_url.strip()
         else:
             tail_url = BUILTIN_TAILS.get(tail_name)
             if not tail_url:
                 raise ValueError(f"未找到内置尾帧「{tail_name}」，可选：{list(BUILTIN_TAILS.keys())}")
+        _tail_cached = (tail_url, cw, ch) in _TAIL_NORM_CACHE
         tail_url = _prepare_tail_url(tail_url, cw, ch, tmp_dir, uid)  # 规格化，避免转场退化硬切
+        _mark(f"尾帧规格化({'缓存命中' if _tail_cached else '重编码'})")
         t2_id = TRANSITION_OPTIONS.get(transition2_name)
         logger.info(f"[{uid}] 黑屏渐显拼接: [末段视频, 尾帧] 转场2={transition2_name}({t2_id})")
         concat_resp = VideoEditClient(ctx=ctx).concat_videos(
             videos=[main_url, tail_url], transitions=[t2_id] if t2_id else None)
         final_video_url = concat_resp.url
+        _mark(f"拼接[末段→尾帧] t2={transition2_name}({t2_id}) → {final_video_url}")
         logger.info(f"[{uid}] 黑屏渐显拼接结果: {final_video_url}")
         if bgm_url and bgm_url.strip():
             bgm_out = os.path.join(tmp_dir, f"final_bgm_{uid}.mp4")
@@ -888,6 +905,7 @@ def process_video_pipeline(
                 os.remove(p)
             except Exception:
                 pass
+        _mark("黑屏渐显完成")
         logger.info(f"[{uid}] 黑屏渐显模式完成: {final_video_url}")
         return {
             "success": True,
@@ -895,6 +913,7 @@ def process_video_pipeline(
             "freeze_video_url": main_url,
             "frame_mode": frame_mode,
             "transition2": transition2_name,
+            "debug_info": "\n".join(diag),
         }
 
     video_url = _upload_video_to_s3(tmp_video, f"temp/input_{uid}.mp4")
@@ -907,6 +926,7 @@ def process_video_pipeline(
     _extract_clean_last_frame(video_url, last_frame_path, video_w, video_h, uid,
                               skip_subtitle_removal=(frame_mode != "去字幕"))
     logger.info(f"[{uid}] 干净最后一帧已提取 (模式={frame_mode}): {last_frame_path}")
+    _mark("Step1 用户视频转存S3 + 提取干净尾帧")
 
     # Step 2: 字幕分段
     logger.info(f"[{uid}] Step 2: 字幕分段")
@@ -943,6 +963,7 @@ def process_video_pipeline(
     segment_durations = [s[2] for s in _tts_slots]
 
     total_audio_duration = sum(segment_durations)
+    _mark(f"Step3 TTS并发{len(subtitle_segments)}段 配音总长{total_audio_duration:.1f}s")
     logger.info(f"[{uid}] TTS 总时长: {total_audio_duration:.2f}s")
 
     merged_audio_path = os.path.join(tmp_dir, f"merged_audio_{uid}.mp3")
@@ -979,6 +1000,7 @@ def process_video_pipeline(
         uid=uid,
     )
     logger.info(f"[{uid}] 图层合成完成: 动态 overlay {len(plan.overlays)} 个")
+    _mark(f"Step4 音频合并上传 + 图层合成(overlay {len(plan.overlays)})")
 
     # Step 5: ffmpeg 生成定格视频
     logger.info(f"[{uid}] Step 5: ffmpeg 生成定格视频")
@@ -993,6 +1015,7 @@ def process_video_pipeline(
 
     freeze_video_url = _upload_video_to_s3(freeze_video_local, f"temp/freeze_{uid}.mp4")
     logger.info(f"[{uid}] 定格视频URL: {freeze_video_url}")
+    _mark("Step5 定格视频ffmpeg编码+上传")
 
     # Step 6: 拼接三段视频
     logger.info(f"[{uid}] Step 6: 拼接视频")
@@ -1010,7 +1033,9 @@ def process_video_pipeline(
             _dw, _dh = _fim.size
     except Exception:
         _dw, _dh = video_w, video_h
+    _tail_cached = (tail_url, _dw, _dh) in _TAIL_NORM_CACHE
     tail_url = _prepare_tail_url(tail_url, _dw, _dh, tmp_dir, uid)
+    _mark(f"Step6 尾帧规格化({'缓存命中' if _tail_cached else '重编码'}) {_dw}x{_dh}")
 
     t1_id = TRANSITION_OPTIONS.get(transition1_name)
     t2_id = TRANSITION_OPTIONS.get(transition2_name)
@@ -1025,12 +1050,14 @@ def process_video_pipeline(
         transitions=[t1_id] if t1_id else None,
     )
     logger.info(f"[{uid}] 拼接①响应: {first_resp!r}")
+    _mark(f"拼接①[用户视频→定格] t1={transition1_name}({t1_id}) → {getattr(first_resp, 'url', first_resp)!r}")
     logger.info(f"[{uid}] 拼接② [→广告尾帧] transitions={[t2_id] if t2_id else None}")
     concat_resp = video_edit_client.concat_videos(
         videos=[first_resp.url, tail_url],
         transitions=[t2_id] if t2_id else None,
     )
     logger.info(f"[{uid}] 拼接②响应: {concat_resp!r}")
+    _mark(f"拼接②[→尾帧] t2={transition2_name}({t2_id}) → {getattr(concat_resp, 'url', concat_resp)!r}")
     final_video_url = concat_resp.url
     logger.info(f"[{uid}] 拼接后视频URL: {final_video_url}")
 
@@ -1049,6 +1076,8 @@ def process_video_pipeline(
         )
         final_video_url = _upload_video_to_s3(bgm_output, f"temp/final_with_bgm_{uid}.mp4")
         logger.info(f"[{uid}] BGM混音后视频URL: {final_video_url}")
+        _mark("Step7 BGM混音+上传")
+    _mark("管线完成")
 
     # 清理临时文件
     overlay_paths = [spec.path for spec in plan.overlays]
@@ -1062,6 +1091,7 @@ def process_video_pipeline(
     return {
         "success": True,
         "final_video_url": final_video_url,
+        "debug_info": "\n".join(diag),
         "details": {
             "audio_url": merged_audio_url,
             "audio_duration_sec": round(total_audio_duration, 2),

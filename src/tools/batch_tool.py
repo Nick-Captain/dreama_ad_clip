@@ -145,8 +145,9 @@ def _short_tail_name(tail_name: str, tail_custom_url: str) -> str:
     return t or "尾帧"
 
 
-def _rename_output(final_url: str, video_name: str, created_ms, tail_name: str, tail_custom_url: str, uid: str) -> str:
-    """把成片转存到我们的存储，命名为「日期-原文件名-尾帧简称.mp4」，返回新URL；失败则返回原URL。"""
+def _rename_output(final_url: str, video_name: str, created_ms, tail_name: str, tail_custom_url: str, uid: str):
+    """把成片转存到我们的存储，命名为「日期-原文件名-尾帧简称.mp4」。
+    返回 (新URL, 状态备注)；失败则返回 (原URL, 失败备注)。"""
     import os
     import tempfile
     import datetime
@@ -181,19 +182,21 @@ def _rename_output(final_url: str, video_name: str, created_ms, tail_name: str, 
         # 若存储/代理不接受该参数而报错，退回不带 CD 的普通改名（至少恢复 ASCII 规范名）。
         try:
             key = _upload(with_cd=True)
+            note = f"改名:带CD成功({fname})"
             logger.info(f"[批量处理] 成片改名成功（带 Content-Disposition）: {fname}")
         except Exception as cd_err:
             logger.warning(f"[批量处理] 带 Content-Disposition 上传失败，退回普通改名: {cd_err}")
             key = _upload(with_cd=False)
+            note = f"改名:退回无CD(下载名带哈希后缀)({fname})｜CD报错={str(cd_err)[:120]}"
             logger.info(f"[批量处理] 成片改名成功（无 Content-Disposition，下载名仍带哈希后缀）: {fname}")
         try:
             os.remove(tmp)
         except Exception:
             pass
-        return storage.generate_presigned_url(key=key, expire_time=2592000)
+        return storage.generate_presigned_url(key=key, expire_time=2592000), note
     except Exception as e:
         logger.warning(f"[批量处理] 成片规范命名失败，用原URL: {e}")
-        return final_url
+        return final_url, f"改名:失败用原URL({str(e)[:120]})"
 
 
 # ============================================================
@@ -403,8 +406,9 @@ def batch_process_from_bitable(
                     if result_data.get("success"):
                         # 成功：成片规范命名（日期-原名-尾帧）后写回输出URL
                         final_url = result_data.get("final_video_url", "")
+                        rename_note = ""
                         if final_url:
-                            final_url = _rename_output(
+                            final_url, rename_note = _rename_output(
                                 final_url, field_to_text(fields.get("视频名")),
                                 fields.get("创作日期"), _tail_name, _tail_custom_url, record_id,
                             )
@@ -412,6 +416,10 @@ def batch_process_from_bitable(
                             note = f"提示：本条为重新处理，旧输出视频已被覆盖。旧链接备份：{old_output_url}"
                         else:
                             note = ""
+                        # 诊断信息（替代扣子运行时拿不到的日志）：每步耗时 + 改名/CD 结果
+                        debug_text = result_data.get("debug_info", "")
+                        if rename_note:
+                            debug_text = (debug_text + "\n" + rename_note) if debug_text else rename_note
                         client.update_records(
                             app_token=app_token,
                             table_id=table_id,
@@ -421,6 +429,7 @@ def batch_process_from_bitable(
                                     "处理状态": "成功",
                                     "输出视频URL": final_url,
                                     "错误信息": note,
+                                    "调试信息": debug_text[:2000],
                                 },
                             }],
                         )
